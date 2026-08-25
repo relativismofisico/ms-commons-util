@@ -1,0 +1,118 @@
+plugins {
+    id 'java-library'
+    id 'groovy'
+    id 'jacoco'
+    id 'checkstyle'
+    id 'pmd'
+    id 'com.github.spotbugs' version '6.1.7'
+    id 'maven-publish'
+    // Solo el BOM de versiones (Spring Boot Dependencies) — sin el plugin
+    // 'org.springframework.boot', que agrega tareas de app ejecutable
+    // (bootJar/bootRun) que no aplican acá: esto es una librería.
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'com.factoring'
+version = '0.2.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+    withSourcesJar()
+}
+
+jacoco {
+    toolVersion = '0.8.13'
+}
+
+spotbugs {
+    excludeFilter = file('config/spotbugs/exclude.xml')
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencyManagement {
+    imports {
+        mavenBom "org.springframework.boot:spring-boot-dependencies:3.5.4"
+    }
+}
+
+dependencies {
+    // Tipos públicos expuestos en las firmas de las clases de la librería
+    // (OncePerRequestFilter, StringRedisTemplate, HttpStatus, Servlet API) —
+    // 'compileOnly' (scope "provided"): los 10 backends consumidores YA los
+    // traen vía sus propios starters (spring-boot-starter-web/data-redis), y
+    // la librería no debe forzar/fijar una versión de Spring propia — debe
+    // compilar contra la API y dejar que cada consumidor resuelva la versión
+    // real en tiempo de ejecución (que hoy es 3.5.4 en los 10, pero no es
+    // responsabilidad de esta librería fijarlo).
+    compileOnly 'org.springframework:spring-web'
+    compileOnly 'org.springframework.data:spring-data-redis'
+    compileOnly 'jakarta.servlet:jakarta.servlet-api:6.0.0'
+
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+
+    testCompileOnly 'org.projectlombok:lombok'
+    testAnnotationProcessor 'org.projectlombok:lombok'
+
+    testImplementation 'org.springframework:spring-web'
+    testImplementation 'org.springframework.data:spring-data-redis'
+    testImplementation 'jakarta.servlet:jakarta.servlet-api:6.0.0'
+    testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    // Spock Framework — pruebas unitarias en Groovy
+    testImplementation 'org.spockframework:spock-core:2.4-groovy-4.0'
+    // Backend de mocking para clases concretas (StringRedisTemplate no es
+    // interfaz) — los 10 backends lo traen indirecto vía spring-boot-starter-test;
+    // acá se declara directo para no acoplar la librería a ese starter completo.
+    testImplementation 'net.bytebuddy:byte-buddy:1.15.11'
+
+    spotbugsPlugins 'com.h3xstream.findsecbugs:findsecbugs-plugin:1.13.0'
+}
+
+test {
+    useJUnitPlatform()
+    finalizedBy jacocoTestReport
+}
+
+checkstyle {
+    toolVersion = '10.20.2'
+    configFile = file('config/checkstyle/checkstyle.xml')
+}
+
+pmd {
+    toolVersion = '7.9.0'
+    ruleSetFiles = files('config/pmd/ruleset.xml')
+    ruleSets = []
+    consoleOutput = true
+}
+
+apply from: "${rootProject.projectDir}/coverage.gradle"
+
+publishing {
+    publications {
+        gpr(MavenPublication) {
+            from components.java
+            pom {
+                name = 'ms-commons-util'
+                description = 'Utilidades compartidas de la plataforma Integrity (Factoring/Confirming): ' +
+                        'resolución de IP real tras proxy/LB, rate-limiting por IP respaldado por Redis.'
+            }
+        }
+    }
+    repositories {
+        maven {
+            name = 'GitHubPackages'
+            url = uri('https://maven.pkg.github.com/relativismofisico/ms-commons-util')
+            credentials {
+                username = project.findProperty('gpr.user') ?: System.getenv('GITHUB_ACTOR')
+                password = project.findProperty('gpr.token') ?: System.getenv('GITHUB_TOKEN')
+            }
+        }
+    }
+}

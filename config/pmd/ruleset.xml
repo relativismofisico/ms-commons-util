@@ -1,0 +1,239 @@
+<?xml version="1.0"?>
+<ruleset name="Integrity Platform PMD Rules"
+         xmlns="http://pmd.sourceforge.net/ruleset/2.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0
+             https://pmd.sourceforge.io/ruleset_2_0_0.xsd">
+
+    <description>
+        Ruleset PMD consolidado de la plataforma Integrity — mismo ruleset.xml en los
+        10 backends. Antes de esta unificación existían 2 filosofías distintas: 7 repos
+        con categorías completas activas (denylist, con exclusiones puntuales) y 3 con
+        lista de reglas elegidas una por una (allowlist, mucho menos cobertura real). Esta
+        versión toma como base la denylist más madura y documentada, sumando las
+        exclusiones legítimas encontradas en los otros repos que no tenían equivalente acá.
+        Java 17 / Spring Boot 3 / Lombok.
+    </description>
+
+    <!-- ================================================================
+         BEST PRACTICES
+    ================================================================ -->
+    <rule ref="category/java/bestpractices.xml">
+        <!-- JUnit5 no usa la anotación @Test de JUnit4 -->
+        <exclude name="JUnit5TestShouldBePackagePrivate"/>
+        <!-- Spring usa null en parámetros opcionales de forma controlada -->
+        <exclude name="UseVarargs"/>
+        <!-- Lombok @Slf4j con SLF4J parametrizado no necesita guard -->
+        <exclude name="GuardLogStatement"/>
+        <!-- No aplica con JUnit5 -->
+        <exclude name="JUnitUseExpected"/>
+        <!-- Los @Service Spring suelen tener muchos métodos por diseño -->
+        <exclude name="AccessorMethodGeneration"/>
+        <!-- Spring garantiza que los beans inyectados no son null -->
+        <exclude name="AccessorClassGeneration"/>
+        <!-- HttpHeaders de Spring y clases similares del framework no tienen interfaz separada -->
+        <exclude name="LooseCoupling"/>
+        <!-- Algunos catch-rethrow en controllers/services adaptan el mensaje para la API;
+             el stack trace ya se registra en el log antes de relanzar -->
+        <exclude name="PreserveStackTrace"/>
+        <!-- JUnit4 no se usa en la plataforma, se usa JUnit5/Spock -->
+        <exclude name="JUnit4TestShouldUseAfterAnnotation"/>
+        <exclude name="JUnit4TestShouldUseBeforeAnnotation"/>
+        <exclude name="JUnit4TestShouldUseTestAnnotation"/>
+        <exclude name="JUnit4SuitesShouldUseSuiteAnnotation"/>
+        <!-- MockMvc/WebTestClient afirman vía .andExpect()/.expectStatus(), no assert() directo -->
+        <exclude name="JUnitTestsShouldIncludeAssert"/>
+        <exclude name="JUnitAssertionsShouldIncludeMessage"/>
+        <exclude name="JUnitTestContainsTooManyAsserts"/>
+        <!-- No aplica en código productivo, ya cubierto por Checkstyle donde corresponde -->
+        <exclude name="SystemPrintln"/>
+        <!-- Reasignación de parámetros intencional en utilidades y builders -->
+        <exclude name="AvoidReassigningParameters"/>
+        <!-- Repositorios Spring Data no necesitan implementación propia -->
+        <exclude name="UnusedPrivateField"/>
+        <!-- Clases base compartidas (Strategy/Template) que solo aportan helpers concretos
+             a sus subclases son un patrón válido, no necesitan un método abstracto -->
+        <exclude name="AbstractClassWithoutAbstractMethod"/>
+    </rule>
+
+    <!-- ================================================================
+         CODE STYLE
+    ================================================================ -->
+    <rule ref="category/java/codestyle.xml">
+        <!-- Lombok @RequiredArgsConstructor genera el constructor -->
+        <exclude name="AtLeastOneConstructor"/>
+        <!-- Los controllers Spring retornan desde múltiples ramas -->
+        <exclude name="OnlyOneReturn"/>
+        <!-- Nombres de variables descriptivos, incluso cortos, son válidos según el contexto -->
+        <exclude name="LongVariable"/>
+        <exclude name="ShortVariable"/>
+        <exclude name="ShortMethodName"/>
+        <exclude name="ShortClassName"/>
+        <!-- Agregar 'final' a cada parámetro/variable local es excesivo y no aporta valor real -->
+        <exclude name="LocalVariableCouldBeFinal"/>
+        <exclude name="MethodArgumentCouldBeFinal"/>
+        <!-- Los campos @Autowired no deben estar obligatoriamente al inicio de la clase -->
+        <exclude name="FieldDeclarationsShouldBeAtStartOfClass"/>
+        <!-- Convenciones de nombres propias del proyecto (paquetes, clases) -->
+        <exclude name="ClassNamingConventions"/>
+        <exclude name="UnnecessaryFullyQualifiedName"/>
+        <!-- Lombok @Data genera accesores; el uso de 'this.' es opcional -->
+        <exclude name="UselessQualifiedThis"/>
+        <!-- Declaraciones antes de try/catch son a veces obligatorias -->
+        <exclude name="PrematureDeclaration"/>
+        <!-- Guiones bajos en un segmento del paquete (ej. ms_security) son válidos en la plataforma -->
+        <exclude name="PackageCase"/>
+        <!-- 'var' es un estilo válido y usado deliberadamente en varios repos -->
+        <exclude name="UseExplicitTypes"/>
+        <!-- if (!condition) es la forma idiomática cuando la rama principal es el caso negativo -->
+        <exclude name="ConfusingTernary"/>
+        <!-- super() implícito es correcto, no hace falta declararlo explícito -->
+        <exclude name="CallSuperInConstructor"/>
+        <!-- Los comentarios de campo son manejados por Checkstyle Javadoc, no acá -->
+        <exclude name="CommentDefaultAccessModifier"/>
+        <!-- Guiones bajos en literales numéricos no son obligatorios -->
+        <exclude name="UseUnderscoresInNumericLiterals"/>
+        <!-- Retornar directamente sin variable intermedia es válido -->
+        <exclude name="UnnecessaryLocalBeforeReturn"/>
+        <!-- Se re-incluye individual más abajo con una propiedad custom para Lombok -->
+        <exclude name="UnnecessaryConstructor"/>
+        <exclude name="TooManyStaticImports"/>
+        <!-- Se re-incluye individual más abajo con testPattern relajado para la convención
+             BDD de nombres de test (metodo_escenario_esperado) -->
+        <exclude name="MethodNamingConventions"/>
+        <!-- Heurística de "getter que no debería devolver void" da falsos positivos en
+             métodos de test que empiezan con get/is (ej. getByEmpresa_notFound_returns404,
+             que documenta un endpoint GET, no es un getter real) -->
+        <exclude name="LinguisticNaming"/>
+    </rule>
+
+    <!-- UnnecessaryConstructor con excepción para clases anotadas por Lombok
+         (@NoArgsConstructor/@AllArgsConstructor/@RequiredArgsConstructor/@Data/@Builder) —
+         Lombok genera el constructor, PMD no debe marcarlo como innecesario. -->
+    <rule ref="category/java/codestyle.xml/UnnecessaryConstructor">
+        <properties>
+            <property name="violationSuppressXPath"
+                      value="//ClassDeclaration/ClassBody[
+                        ../Annotation/MarkerAnnotation/ClassType[@SimpleName='NoArgsConstructor']
+                        or ../Annotation/MarkerAnnotation/ClassType[@SimpleName='AllArgsConstructor']
+                        or ../Annotation/MarkerAnnotation/ClassType[@SimpleName='RequiredArgsConstructor']
+                        or ../Annotation/MarkerAnnotation/ClassType[@SimpleName='Data']
+                        or ../Annotation/MarkerAnnotation/ClassType[@SimpleName='Builder']
+                      ]"/>
+        </properties>
+    </rule>
+
+    <!-- MethodNamingConventions activo para código de producción (camelCase estricto), pero con
+         los patrones de test relajados para aceptar la convención BDD ya establecida en la
+         plataforma (metodo_escenario_esperado, con guiones bajos) — mismo criterio que la
+         supresión de MethodName de Checkstyle para archivos *Test.java. -->
+    <rule ref="category/java/codestyle.xml/MethodNamingConventions">
+        <properties>
+            <property name="junit4TestPattern" value="[a-z][a-zA-Z0-9]*(_[a-zA-Z0-9]+)*"/>
+            <property name="junit5TestPattern" value="[a-z][a-zA-Z0-9]*(_[a-zA-Z0-9]+)*"/>
+        </properties>
+    </rule>
+
+    <!-- ================================================================
+         DESIGN
+    ================================================================ -->
+    <rule ref="category/java/design.xml">
+        <!-- Spring controllers/services tienen múltiples dependencias inyectadas por diseño -->
+        <exclude name="LawOfDemeter"/>
+        <exclude name="CouplingBetweenObjects"/>
+        <exclude name="LoosePackageCoupling"/>
+        <!-- DTOs y entidades pueden no tener métodos abstractos -->
+        <exclude name="AbstractClassWithoutAnyMethod"/>
+        <!-- Los servicios/GlobalExceptionHandler pueden tener más métodos/campos que el límite genérico -->
+        <exclude name="TooManyMethods"/>
+        <exclude name="TooManyFields"/>
+        <exclude name="ExcessivePublicCount"/>
+        <exclude name="ExcessiveImports"/>
+        <exclude name="GodClass"/>
+        <!-- La clase principal de Spring Boot no es una utility class real -->
+        <exclude name="UseUtilityClass"/>
+        <!-- Complejidad inherente a la lógica de negocio real de la plataforma — las 4 métricas
+             de PMD que miden esencialmente lo mismo (tamaño/ramificación de un método) se tratan
+             igual: no forzar un split artificial de métodos de negocio ya cubiertos por tests. -->
+        <exclude name="CyclomaticComplexity"/>
+        <exclude name="NPathComplexity"/>
+        <exclude name="NcssCount"/>
+        <exclude name="CognitiveComplexity"/>
+        <!-- Cadenas de validación reales (JWT filters, cálculos financieros con casos en
+             cascada) anidan if legítimamente; aplanar a la fuerza es más riesgo que valor acá -->
+        <exclude name="AvoidDeeplyNestedIfStmts"/>
+        <!-- catch(Exception) es defensivo e intencional en varios puntos (Kafka listeners,
+             controllers, handlers) — especializarlo cambiaría qué excepciones se capturan -->
+        <exclude name="AvoidCatchingGenericException"/>
+        <!-- Spring Security / frameworks externos requieren 'throws Exception' en algunas firmas -->
+        <exclude name="SignatureDeclareThrowsException"/>
+        <!-- DTOs/entidades son data classes por diseño -->
+        <exclude name="DataClass"/>
+        <exclude name="UseObjectForClearerAPI"/>
+        <!-- No siempre se puede aplicar 'final' a clases con constructor privado sin romper el diseño -->
+        <exclude name="ClassWithOnlyPrivateConstructorsShouldBeFinal"/>
+        <!-- throw new RuntimeException(...)/Exception(...) genérico es un patrón real y extendido en
+             wrappers de infraestructura de varios repos (ya excluido explícitamente en
+             ms-notificaciones-util); exigir una jerarquía de excepciones de dominio en cada punto de
+             lanzamiento es un cambio de diseño real, no de estilo — queda fuera de esta unificación. -->
+        <exclude name="AvoidThrowingRawExceptionTypes"/>
+    </rule>
+
+    <!-- ================================================================
+         ERROR PRONE
+    ================================================================ -->
+    <rule ref="category/java/errorprone.xml">
+        <!-- Null checks/asignaciones explícitas son intencionales en varios flujos -->
+        <exclude name="NullAssignment"/>
+        <!-- Lombok @Data genera equals/hashCode; ya se verifica con Checkstyle EqualsHashCode -->
+        <exclude name="OverrideBothEqualsAndHashcode"/>
+        <!-- Entidades JPA/Mongo declaran serialVersionUID explícitamente donde aplica, o no son Serializable -->
+        <exclude name="MissingSerialVersionUID"/>
+        <exclude name="NonSerializableClass"/>
+        <!-- Spring gestiona el ciclo de vida de streams/recursos HTTP -->
+        <exclude name="CloseResource"/>
+        <!-- Literales duplicados (mensajes de log, etc.) son aceptables -->
+        <exclude name="AvoidDuplicateLiterals"/>
+        <exclude name="AvoidLiteralsInIfCondition"/>
+        <!-- Campos con el mismo nombre que un método/tipo son un patrón común en DTOs -->
+        <exclude name="AvoidFieldNameMatchingMethodName"/>
+        <exclude name="AvoidFieldNameMatchingTypeName"/>
+        <!-- Spring gestiona el ciclo de vida de los beans, no necesita finalize -->
+        <exclude name="FinalizeOnlyCallsSuperFinalize"/>
+        <!-- Comparaciones con equals explícitas ya cubren los casos reales -->
+        <exclude name="CompareObjectsWithEquals"/>
+        <exclude name="AssignmentInOperand"/>
+        <!-- Spring instancia beans con constructor privado vía reflexión -->
+        <exclude name="MissingStaticMethodInNonInstantiatableClass"/>
+    </rule>
+
+    <!-- ================================================================
+         MULTITHREADING
+    ================================================================ -->
+    <rule ref="category/java/multithreading.xml">
+        <!-- Spring gestiona la concurrencia de beans singleton a nivel de framework -->
+        <exclude name="UseConcurrentHashMap"/>
+        <exclude name="NonThreadSafeSingleton"/>
+        <exclude name="UnsynchronizedStaticFormatter"/>
+        <exclude name="AvoidSynchronizedAtMethodLevel"/>
+        <!-- El outbox publisher usa un thread propio deliberadamente para el polling -->
+        <exclude name="DoNotUseThreads"/>
+    </rule>
+
+    <!-- ================================================================
+         PERFORMANCE
+    ================================================================ -->
+    <rule ref="category/java/performance.xml">
+        <!-- StringBuilder/logging con concatenación mínima son aceptables -->
+        <exclude name="InsufficientStringBufferDeclaration"/>
+        <!-- Construir un DTO/registro por elemento iterado (una factura, una aprobación, etc.)
+             es el trabajo real del loop, no una instanciación redundante evitable -->
+        <exclude name="AvoidInstantiatingObjectsInLoops"/>
+    </rule>
+
+    <!-- ================================================================
+         SECURITY
+    ================================================================ -->
+    <rule ref="category/java/security.xml"/>
+
+</ruleset>

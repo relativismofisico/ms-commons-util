@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter
+        xmlns="https://github.com/spotbugs/filter/3.0.0"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="https://github.com/spotbugs/filter/3.0.0
+            https://raw.githubusercontent.com/spotbugs/spotbugs/master/spotbugs/etc/findbugsfilter.xsd">
+
+    <!-- ================================================================
+         Dependency injection pattern
+         RateLimitFilter almacena el StringRedisTemplate y el
+         RateLimitResponseWriter recibidos por constructor — mismo patrón
+         ya excluido en los 10 backends consumidores ("Spring-injected
+         services store repository/template references by design"), acá
+         además es una librería: el consumidor es quien decide qué
+         instancia mutable pasar, es el contrato de la clase, no un
+         descuido.
+         ================================================================ -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+        <Class name="com.factoring.commons.web.RateLimitFilter"/>
+    </Match>
+
+    <!-- ================================================================
+         Test classes — exclude all SpotBugs analysis on tests
+         Clases *Spec (Spock, único framework de test de este repo desde
+         el día uno) más las clases internas que el compilador de Groovy
+         genera para cada spec (closures $_nombreMetodo_closureN,
+         $__spock_feature_N_N_closureN, etc.) — ver la lección documentada
+         en el resto de la plataforma (Fase 10 del pipeline de
+         mantenibilidad): sin esto, SpotBugs reporta como bugs reales los
+         artefactos normales del compilador Groovy (getMetaClass()/
+         setMetaClass(), closures Serializable sin serialVersionUID).
+         ================================================================ -->
+    <Match>
+        <Class name="~.*Spec"/>
+    </Match>
+
+    <Match>
+        <Class name="~.*Spec\$.*"/>
+    </Match>
+
+</FindBugsFilter>
