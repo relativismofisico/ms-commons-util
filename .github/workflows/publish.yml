@@ -1,0 +1,68 @@
+name: Publicar en GitHub Packages
+
+# Publica el artefacto Maven (com.factoring:ms-commons-util) en GitHub Packages
+# al empujar un tag `v*` (p.ej. v0.2.0). El `version` real lo fija build.gradle;
+# el tag es solo el disparador — mantenelos alineados.
+#
+# No hace falta ningún PAT: el GITHUB_TOKEN del propio repo tiene permiso de
+# escritura sobre SU package (permissions.packages: write). build.gradle lee
+# GITHUB_ACTOR/GITHUB_TOKEN del entorno (o gpr.user/gpr.token como property
+# para publicar a mano desde una máquina local).
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  JAVA_VERSION: '17'
+
+jobs:
+  publish:
+    name: build + publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Configurar JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Grant Gradle permissions
+        run: chmod +x gradlew
+
+      - name: Verificar que el tag coincide con la version de build.gradle
+        if: github.event_name == 'push'
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          GRADLE_VERSION="$(./gradlew -q properties | awk -F': ' '/^version: / {print $2}')"
+          echo "tag=$TAG_VERSION  build.gradle=$GRADLE_VERSION"
+          if [ "$TAG_VERSION" != "$GRADLE_VERSION" ]; then
+            echo "::error::El tag ($TAG_VERSION) no coincide con version en build.gradle ($GRADLE_VERSION)"
+            exit 1
+          fi
+
+      - name: Build + check
+        run: ./gradlew clean check --no-daemon --stacktrace
+
+      - name: Publicar en GitHub Packages
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./gradlew publish --no-daemon --stacktrace
+
+      - name: Publicar reporte de tests
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-report
+          path: build/reports/tests/test/
