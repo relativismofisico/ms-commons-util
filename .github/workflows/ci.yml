@@ -1,0 +1,46 @@
+# CI de validación para cada push/PR sobre master: corre los gates de calidad
+# (Checkstyle, PMD, SpotBugs, tests con JaCoCo) ya configurados en build.gradle.
+# Es independiente de publish.yml (que solo publica el paquete al crear un tag v*).
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Configurar JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Grant Gradle permissions
+        run: chmod +x gradlew
+
+      - name: Checkstyle, PMD, SpotBugs y tests
+        run: ./gradlew checkstyleMain pmdMain spotbugsMain test --no-daemon
+
+      - name: Subir reportes de calidad
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-reports
+          path: |
+            build/reports/checkstyle/
+            build/reports/pmd/
+            build/reports/spotbugs/
+            build/reports/tests/
+            build/reports/jacoco/
+          retention-days: 14
