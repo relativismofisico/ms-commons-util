@@ -32,6 +32,14 @@ public final class MdcConstants {
      */
     public static final String COMPANY_ID_ATTR = "com.factoring.commons.mdc.companyId";
 
+    /**
+     * Atributo de request ({@code Boolean.TRUE}) con el que el filtro JWT indica que la autenticación no es de un usuario
+     * humano aunque tenga principal: por ejemplo, los tokens de sesión temprana y de onboarding de ms-registroempresa-neg,
+     * cuyo principal es el id de la empresa. {@link ActorMdcFilter} deja entonces {@link #USER} vacío; la empresa va en
+     * {@link #COMPANY_ID_ATTR}.
+     */
+    public static final String SIN_USUARIO_HUMANO_ATTR = "com.factoring.commons.mdc.sinUsuarioHumano";
+
     /** Atributo de request con el requestId ya resuelto, para reusarlo si la misma request vuelve a pasar (dispatch de error). */
     static final String REQUEST_ID_ATTR = "com.factoring.commons.mdc.requestId";
 

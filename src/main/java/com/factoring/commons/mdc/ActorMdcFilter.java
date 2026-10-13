@@ -17,7 +17,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * <ul>
  *   <li>{@link MdcConstants#USER}: el nombre de la {@link Authentication} del {@link SecurityContextHolder} (el
  *       {@code sub} del token; en llamadas entre microservicios, la cuenta de servicio). Vacío si la request es
- *       anónima.</li>
+ *       anónima, o si el filtro JWT marcó {@link MdcConstants#SIN_USUARIO_HUMANO_ATTR} (token de una empresa sin
+ *       usuario humano, como la sesión temprana de registro).</li>
  *   <li>{@link MdcConstants#COMPANY_ID}: el atributo {@link MdcConstants#COMPANY_ID_ATTR}, que el filtro JWT del
  *       servicio llena con el claim {@code emp} después de validar el token. Vacío si no lo hay (cuentas de servicio,
  *       Basic auth, registro anónimo).</li>
@@ -33,7 +34,7 @@ public class ActorMdcFilter extends OncePerRequestFilter {
     protected void doFilterInternal(final HttpServletRequest request, final HttpServletResponse response,
             final FilterChain chain) throws ServletException, IOException {
         final String user = usuarioAutenticado();
-        if (user != null) {
+        if (user != null && !Boolean.TRUE.equals(request.getAttribute(MdcConstants.SIN_USUARIO_HUMANO_ATTR))) {
             MDC.put(MdcConstants.USER, user);
         }
         final Object empresa = request.getAttribute(MdcConstants.COMPANY_ID_ATTR);
