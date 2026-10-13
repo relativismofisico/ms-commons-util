@@ -50,6 +50,17 @@ class ActorMdcFilterSpec extends Specification {
         mdcDentroDeLaCadena() == ["svc-liquidador", null]
     }
 
+    def "token de una empresa sin usuario humano (sesión temprana/onboarding): usuario vacío, empresa del atributo"() {
+        given: "el principal es el id de la empresa, como en ms-registroempresa-neg"
+        SecurityContextHolder.context.authentication = new UsernamePasswordAuthenticationToken(
+                7500L, null, [new SimpleGrantedAuthority("REGISTRO_SESION")])
+        request.setAttribute(MdcConstants.SIN_USUARIO_HUMANO_ATTR, Boolean.TRUE)
+        request.setAttribute(MdcConstants.COMPANY_ID_ATTR, 7500L)
+
+        expect:
+        mdcDentroDeLaCadena() == [null, "7500"]
+    }
+
     def "request anónima o sin autenticación: sin usuario"() {
         given:
         if (anonima) {
