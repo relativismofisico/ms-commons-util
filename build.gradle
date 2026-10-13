@@ -13,7 +13,7 @@ plugins {
 }
 
 group = 'com.factoring'
-version = '0.2.0'
+version = '0.3.0'
 
 java {
     toolchain {
@@ -53,6 +53,16 @@ dependencies {
     compileOnly 'org.springframework.data:spring-data-redis'
     compileOnly 'jakarta.servlet:jakarta.servlet-api:6.0.0'
 
+    // Trazabilidad (MDC + propagación del requestId) — mismo criterio 'compileOnly': la autoconfiguración solo
+    // registra cada pieza si el consumidor trae la clase (@ConditionalOnClass), así un servicio sin Feign o sin
+    // WebFlux no necesita ninguno de los dos.
+    compileOnly 'org.slf4j:slf4j-api'
+    compileOnly 'org.springframework.boot:spring-boot'
+    compileOnly 'org.springframework.boot:spring-boot-autoconfigure'
+    compileOnly 'org.springframework.security:spring-security-core'
+    compileOnly 'org.springframework:spring-webflux'
+    compileOnly 'io.github.openfeign:feign-core:13.6'
+
     compileOnly 'org.projectlombok:lombok'
     annotationProcessor 'org.projectlombok:lombok'
 
@@ -63,6 +73,16 @@ dependencies {
     testImplementation 'org.springframework.data:spring-data-redis'
     testImplementation 'jakarta.servlet:jakarta.servlet-api:6.0.0'
     testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
+    testImplementation 'org.slf4j:slf4j-api'
+    testImplementation 'org.springframework:spring-test'
+    testImplementation 'org.springframework.boot:spring-boot-test'
+    testImplementation 'org.assertj:assertj-core'
+    testImplementation 'org.springframework.boot:spring-boot-autoconfigure'
+    testImplementation 'org.springframework.security:spring-security-core'
+    testImplementation 'org.springframework:spring-webflux'
+    testImplementation 'io.github.openfeign:feign-core:13.6'
+    testImplementation 'org.apache.tomcat.embed:tomcat-embed-core'
+    testRuntimeOnly 'ch.qos.logback:logback-classic'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
     // Spock Framework — pruebas unitarias en Groovy
