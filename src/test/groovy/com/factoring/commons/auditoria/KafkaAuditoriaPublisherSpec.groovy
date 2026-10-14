@@ -67,4 +67,51 @@ class KafkaAuditoriaPublisherSpec extends Specification {
         then:
         1 * template.destroy()
     }
+
+    // ── publicarConfirmado (relay de outbox) ──────────────────────────────────
+
+    def "publicarConfirmado espera la confirmación del broker, con la misma clave y JSON"() {
+        given:
+        def e = evento()
+
+        when:
+        publisher.publicarConfirmado(e)
+
+        then:
+        1 * template.send("auditoria.accion", "FACTURA:CUFE-1", { AuditoriaJson.deserializar(it).eventId() == e.eventId() &&
+                AuditoriaJson.deserializar(it).servicioOrigen() == "ms-prueba" }) >> CompletableFuture.completedFuture(Mock(SendResult))
+        noExceptionThrown()
+    }
+
+    def "publicarConfirmado propaga el fallo de Kafka (asíncrono o síncrono) para que el outbox reintente"() {
+        given:
+        def e = evento()
+
+        when:
+        publisher.publicarConfirmado(e)
+
+        then:
+        1 * template.send(_, _, _) >> respuesta
+        def error = thrown(AuditoriaNoPublicadaException)
+        error.message.contains(e.eventId())
+
+        where:
+        respuesta << [CompletableFuture.failedFuture(new RuntimeException("broker caído")),
+                      { throw new IllegalStateException("max.block.ms") }]
+    }
+
+    def "publicarConfirmado interrumpido: restaura el flag de interrupción y propaga"() {
+        given:
+        def futuro = Mock(CompletableFuture) {
+            get(_, _) >> { throw new InterruptedException("apagando") }
+        }
+
+        when:
+        publisher.publicarConfirmado(evento())
+
+        then:
+        1 * template.send(_, _, _) >> futuro
+        thrown(AuditoriaNoPublicadaException)
+        Thread.interrupted()
+    }
 }
