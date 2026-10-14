@@ -16,4 +16,14 @@ public interface AuditoriaPublisher {
      * @param evento evento construido con {@link AuditoriaAccionEvent#builder()}
      */
     void publicar(AuditoriaAccionEvent evento);
+
+    /**
+     * Publica el evento y espera la confirmación del broker. Para el relay de un outbox: si Kafka falla lanza
+     * {@link AuditoriaNoPublicadaException} y el outbox deja el evento pendiente para reintentarlo (el
+     * {@code eventId} es el mismo en cada reintento, y el consumidor descarta los duplicados).
+     *
+     * @param evento evento construido con {@link AuditoriaAccionEvent#builder()}
+     * @throws AuditoriaNoPublicadaException si Kafka no lo confirmó
+     */
+    void publicarConfirmado(AuditoriaAccionEvent evento);
 }
