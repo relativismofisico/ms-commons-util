@@ -21,6 +21,23 @@
     </Match>
 
     <!-- ================================================================
+         Auditoría (0.4.0):
+         - KafkaAuditoriaPublisher guarda el KafkaTemplate recibido por
+           constructor: mismo caso que RateLimitFilter (lo crea la
+           autoconfiguración y es exclusivo del publicador).
+         - AuditoriaAccionEvent.detalle(): el constructor compacto del
+           record ya lo deja como Map.copyOf (inmutable); SpotBugs no lo ve.
+         ================================================================ -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+        <Class name="com.factoring.commons.auditoria.KafkaAuditoriaPublisher"/>
+    </Match>
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP"/>
+        <Class name="com.factoring.commons.auditoria.AuditoriaAccionEvent"/>
+    </Match>
+
+    <!-- ================================================================
          Test classes — exclude all SpotBugs analysis on tests
          Clases *Spec (Spock, único framework de test de este repo desde
          el día uno) más las clases internas que el compilador de Groovy

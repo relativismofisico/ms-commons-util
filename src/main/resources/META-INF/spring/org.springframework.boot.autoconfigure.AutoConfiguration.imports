@@ -1,1 +1,2 @@
 com.factoring.commons.mdc.MdcAutoConfiguration
+com.factoring.commons.auditoria.AuditoriaAutoConfiguration
