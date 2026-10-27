@@ -1,5 +1,9 @@
 package com.factoring.commons.auditoria
 
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
+import org.slf4j.LoggerFactory
 import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.kafka.support.SendResult
 import spock.lang.Specification
@@ -113,5 +117,61 @@ class KafkaAuditoriaPublisherSpec extends Specification {
         1 * template.send(_, _, _) >> futuro
         thrown(AuditoriaNoPublicadaException)
         Thread.interrupted()
+    }
+
+    def "evento no publicado: el log general solo lleva identificadores; el evento completo va al logger dedicado"() {
+        given:
+        def general = capturar(KafkaAuditoriaPublisher.name)
+        def dedicado = capturar(KafkaAuditoriaPublisher.LOGGER_NO_PUBLICADO)
+        def sensible = AuditoriaAccionEvent.builder()
+                .accion(Acciones.FACTURA_CARGADA)
+                .entidad(EntidadTipo.FACTURA, "CUFE-1")
+                .actor(AuditoriaActor.usuario("actor-sensible", "EMPRESA", 1L))
+                .canal(Canal.WEB)
+                .ip("203.0.113.77")
+                .detalle("monto", "detalle-sensible-123")
+                .build()
+
+        when:
+        publisher.publicar(sensible)
+
+        then:
+        1 * template.send(_, _, _) >> CompletableFuture.failedFuture(new RuntimeException("broker caído"))
+        general.list.size() == 1
+        def lineaGeneral = general.list[0].formattedMessage
+        lineaGeneral.contains("eventId=" + sensible.eventId())
+        lineaGeneral.contains("accion=" + Acciones.FACTURA_CARGADA)
+        lineaGeneral.contains("entidad=" + EntidadTipo.FACTURA + ":CUFE-1")
+        lineaGeneral.contains("servicioOrigen=ms-prueba")
+        !lineaGeneral.contains("203.0.113.77")
+        !lineaGeneral.contains("actor-sensible")
+        !lineaGeneral.contains("detalle-sensible-123")
+
+        dedicado.list.size() == 1
+        def lineaDedicada = dedicado.list[0].formattedMessage
+        lineaDedicada.contains(sensible.eventId())
+        lineaDedicada.contains("203.0.113.77")
+        lineaDedicada.contains("actor-sensible")
+        lineaDedicada.contains("detalle-sensible-123")
+
+        cleanup:
+        soltar(KafkaAuditoriaPublisher.name, general)
+        soltar(KafkaAuditoriaPublisher.LOGGER_NO_PUBLICADO, dedicado)
+    }
+
+    def "el logger dedicado tiene un nombre fijo: los logback de los servicios lo referencian por nombre"() {
+        expect:
+        KafkaAuditoriaPublisher.LOGGER_NO_PUBLICADO == "AUDITORIA_NO_PUBLICADO"
+    }
+
+    private static ListAppender<ILoggingEvent> capturar(String nombre) {
+        def appender = new ListAppender<ILoggingEvent>()
+        appender.start()
+        ((Logger) LoggerFactory.getLogger(nombre)).addAppender(appender)
+        appender
+    }
+
+    private static void soltar(String nombre, ListAppender<ILoggingEvent> appender) {
+        ((Logger) LoggerFactory.getLogger(nombre)).detachAppender(appender)
     }
 }
