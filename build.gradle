@@ -13,7 +13,7 @@ plugins {
 }
 
 group = 'com.factoring'
-version = '0.4.1'
+version = '0.4.2'
 
 java {
     toolchain {
@@ -88,7 +88,8 @@ dependencies {
     testImplementation 'org.springframework.kafka:spring-kafka'
     testImplementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
     testImplementation 'org.apache.tomcat.embed:tomcat-embed-core'
-    testRuntimeOnly 'ch.qos.logback:logback-classic'
+    // En compilación de tests: KafkaAuditoriaPublisherSpec captura el log general y el logger dedicado
+    testImplementation 'ch.qos.logback:logback-classic'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
     // Spock Framework — pruebas unitarias en Groovy
