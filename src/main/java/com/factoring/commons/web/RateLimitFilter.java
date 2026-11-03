@@ -29,6 +29,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
 @Slf4j
 public class RateLimitFilter extends OncePerRequestFilter {
 
+    private static final String ACTUATOR = "/actuator";
+
     private final StringRedisTemplate redisTemplate;
     private final String keyPrefix;
     private final boolean enabled;
@@ -64,7 +66,10 @@ public class RateLimitFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(final HttpServletRequest request, final HttpServletResponse response,
             final FilterChain filterChain) throws ServletException, IOException {
-        if (!enabled) {
+        // Actuator fuera del límite (y sin consultar Redis): si Redis no responde, la liveness/readiness no
+        // debe fallar con él (ms-commons-util#7). Se decide aquí y no en shouldNotFilter porque los
+        // consumidores lo sobreescriben para sus propias exenciones.
+        if (!enabled || esActuator(request)) {
             filterChain.doFilter(request, response);
             return;
         }
@@ -86,5 +91,22 @@ public class RateLimitFilter extends OncePerRequestFilter {
         }
 
         filterChain.doFilter(request, response);
+    }
+
+    /**
+     * @param request petición en curso
+     * @return {@code true} si la ruta, sin el context-path, es {@code /actuator} o está bajo {@code /actuator/}
+     */
+    private static boolean esActuator(final HttpServletRequest request) {
+        final String uri = request.getRequestURI();
+        if (uri == null) {
+            return false;
+        }
+        String ruta = uri;
+        final String contextPath = request.getContextPath();
+        if (contextPath != null && !contextPath.isEmpty() && uri.startsWith(contextPath)) {
+            ruta = uri.substring(contextPath.length());
+        }
+        return ACTUATOR.equals(ruta) || ruta.startsWith(ACTUATOR + "/");
     }
 }

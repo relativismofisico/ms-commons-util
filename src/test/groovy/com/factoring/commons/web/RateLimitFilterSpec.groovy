@@ -107,4 +107,60 @@ class RateLimitFilterSpec extends Specification {
         then:
         1 * valueOperations.increment("ratelimit:test-service:198.51.100.7")
     }
+
+    def "actuator (#uri, context-path '#contexto') continúa la cadena sin consultar Redis"() {
+        given:
+        def peticion = Mock(HttpServletRequest)
+        peticion.getRequestURI() >> uri
+        peticion.getContextPath() >> contexto
+
+        when:
+        filter.doFilterInternal(peticion, response, filterChain)
+
+        then:
+        1 * filterChain.doFilter(peticion, response)
+        0 * redisTemplate._
+        0 * responseWriter._
+
+        where:
+        uri                                       | contexto
+        "/actuator/health"                        | ""
+        "/actuator"                               | ""
+        "/securityapi/actuator/health/liveness"   | "/securityapi"
+        "/api/actuator/health/readiness"          | "/api"
+    }
+
+    def "una ruta que solo empieza por actuator sin ser actuator (#uri) sigue limitada"() {
+        given:
+        def peticion = Mock(HttpServletRequest)
+        peticion.getRequestURI() >> uri
+        peticion.getContextPath() >> ""
+        peticion.getRemoteAddr() >> IP
+        valueOperations.increment(_ as String) >> 1L
+
+        when:
+        filter.doFilterInternal(peticion, response, filterChain)
+
+        then:
+        1 * valueOperations.increment("ratelimit:test-service:" + IP) >> 1L
+        1 * filterChain.doFilter(peticion, response)
+
+        where:
+        uri << ["/actuatorx", "/auth/actuator/health"]
+    }
+
+    def "si Redis no responde, actuator responde igual (la liveness no depende de Redis)"() {
+        given:
+        def peticion = Mock(HttpServletRequest)
+        peticion.getRequestURI() >> "/securityapi/actuator/health/liveness"
+        peticion.getContextPath() >> "/securityapi"
+        redisTemplate.opsForValue() >> { throw new IllegalStateException("Unable to connect to Redis") }
+
+        when:
+        filter.doFilterInternal(peticion, response, filterChain)
+
+        then:
+        noExceptionThrown()
+        1 * filterChain.doFilter(peticion, response)
+    }
 }
