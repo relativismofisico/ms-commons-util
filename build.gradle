@@ -34,6 +34,9 @@ repositories {
     mavenCentral()
 }
 
+// 1.21.3 (la del BOM de Boot 3.5.4) no habla con Docker Engine 29 (API mínima 1.44); 1.21.4 sí.
+ext['testcontainers.version'] = '1.21.4'
+
 dependencyManagement {
     imports {
         mavenBom "org.springframework.boot:spring-boot-dependencies:3.5.4"
@@ -66,6 +69,13 @@ dependencies {
     compileOnly 'org.springframework.kafka:spring-kafka'
     compileOnly 'com.fasterxml.jackson.core:jackson-databind'
     compileOnly 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
+    // Outbox de auditoría (0.5.0): cada almacén se registra solo si el servicio trae su clase (JDBC o Mongo), y
+    // ShedLock solo si ya lo usa (bloqueo de la limpieza). Ninguno es obligatorio.
+    compileOnly 'org.springframework:spring-tx'
+    compileOnly 'org.springframework:spring-jdbc'
+    compileOnly 'org.springframework.data:spring-data-mongodb'
+    compileOnly 'org.mongodb:mongodb-driver-sync'
+    compileOnly 'net.javacrumbs.shedlock:shedlock-core:5.13.0'
 
     compileOnly 'org.projectlombok:lombok'
     annotationProcessor 'org.projectlombok:lombok'
@@ -88,6 +98,18 @@ dependencies {
     testImplementation 'org.springframework.kafka:spring-kafka'
     testImplementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
     testImplementation 'org.apache.tomcat.embed:tomcat-embed-core'
+    testImplementation 'org.springframework:spring-tx'
+    testImplementation 'org.springframework:spring-jdbc'
+    testImplementation 'org.springframework.data:spring-data-mongodb'
+    testImplementation 'org.mongodb:mongodb-driver-sync'
+    testImplementation 'net.javacrumbs.shedlock:shedlock-core:5.13.0'
+    // Integración del outbox contra MySQL, Mongo (replica set de un nodo) y Kafka reales
+    testImplementation 'org.testcontainers:testcontainers'
+    testImplementation 'org.testcontainers:mysql'
+    testImplementation 'org.testcontainers:mongodb'
+    testImplementation 'org.testcontainers:kafka'
+    testRuntimeOnly 'com.mysql:mysql-connector-j'
+    testImplementation 'com.zaxxer:HikariCP'
     // En compilación de tests: KafkaAuditoriaPublisherSpec captura el log general y el logger dedicado
     testImplementation 'ch.qos.logback:logback-classic'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
@@ -130,7 +152,8 @@ publishing {
             pom {
                 name = 'ms-commons-util'
                 description = 'Utilidades compartidas de la plataforma Integrity (Factoring/Confirming): ' +
-                        'resolución de IP real tras proxy/LB, rate-limiting por IP respaldado por Redis.'
+                        'resolución de IP real tras proxy/LB, rate-limiting por IP, trazabilidad y auditoría ' +
+                        '(con outbox transaccional opcional).'
             }
         }
     }

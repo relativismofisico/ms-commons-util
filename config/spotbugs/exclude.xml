@@ -38,6 +38,21 @@
     </Match>
 
     <!-- ================================================================
+         Outbox de auditoría (0.5.0): el relay, la limpieza, el planificador
+         y los adaptadores guardan las propiedades y el MongoTemplate que
+         les pasa la autoconfiguración (mismo patrón de inyección por
+         constructor que arriba); AuditoriaOutboxProperties expone su
+         objeto anidado 'mongo' porque así lo enlaza Spring Boot.
+         ================================================================ -->
+    <Match>
+        <Or>
+            <Bug pattern="EI_EXPOSE_REP"/>
+            <Bug pattern="EI_EXPOSE_REP2"/>
+        </Or>
+        <Package name="~com\.factoring\.commons\.auditoria\.outbox(\..*)?"/>
+    </Match>
+
+    <!-- ================================================================
          Test classes — exclude all SpotBugs analysis on tests
          Clases *Spec (Spock, único framework de test de este repo desde
          el día uno) más las clases internas que el compilador de Groovy
@@ -54,6 +69,13 @@
 
     <Match>
         <Class name="~.*Spec\$.*"/>
+    </Match>
+
+    <!-- Apoyo de las pruebas del outbox (base abstracta de las specs de
+         integración, contenedores y reloj de prueba): mismo criterio que las
+         *Spec, son clases Groovy de test con sus closures. -->
+    <Match>
+        <Class name="~com\.factoring\.commons\.auditoria\.outbox\.(OutboxIntegracionBase|KafkaDePrueba|RelojDePrueba)(\$.*)?"/>
     </Match>
 
 </FindBugsFilter>
