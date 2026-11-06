@@ -30,10 +30,30 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class OutboxAuditoriaRelay {
 
+    /** Esperas entre los intentos de marcar ENVIADO tras el ack (3 intentos en total). */
+    static final List<Duration> ESPERAS_MARCADO = List.of(Duration.ofMillis(200), Duration.ofMillis(400));
+
+    /** Pausa del hilo del relay; inyectable para los tests. */
+    @FunctionalInterface
+    public interface Pausa {
+
+        /** Pausa real del hilo. */
+        Pausa DORMIR = duracion -> Thread.sleep(duracion.toMillis());
+
+        /**
+         * Detiene el hilo durante la duración indicada.
+         *
+         * @param duracion cuánto
+         * @throws InterruptedException si interrumpen el hilo
+         */
+        void esperar(Duration duracion) throws InterruptedException;
+    }
+
     private final AuditoriaOutboxPort outbox;
     private final AuditoriaPublisher publicador;
     private final AuditoriaOutboxProperties propiedades;
     private final Clock reloj;
+    private final Pausa pausa;
 
     /**
      * @param outbox      almacén del outbox
@@ -43,10 +63,23 @@ public class OutboxAuditoriaRelay {
      */
     public OutboxAuditoriaRelay(final AuditoriaOutboxPort outbox, final AuditoriaPublisher publicador,
             final AuditoriaOutboxProperties propiedades, final Clock reloj) {
+        this(outbox, publicador, propiedades, reloj, Pausa.DORMIR);
+    }
+
+    /**
+     * @param outbox      almacén del outbox
+     * @param publicador  publicador de auditoría (espera el ack)
+     * @param propiedades {@code auditoria.outbox.*}
+     * @param reloj       reloj de los leases y reintentos
+     * @param pausa       pausa entre los intentos de marcar ENVIADO
+     */
+    public OutboxAuditoriaRelay(final AuditoriaOutboxPort outbox, final AuditoriaPublisher publicador,
+            final AuditoriaOutboxProperties propiedades, final Clock reloj, final Pausa pausa) {
         this.outbox = outbox;
         this.publicador = publicador;
         this.propiedades = propiedades;
         this.reloj = reloj;
+        this.pausa = pausa;
     }
 
     /**
@@ -111,8 +144,41 @@ public class OutboxAuditoriaRelay {
             registrarFallo(evento, ErrorSaneado.de(e));
             return false;
         }
-        outbox.marcarEnviado(evento.id(), reloj.instant());
+        marcarEnviado(evento);
         return true;
+    }
+
+    /**
+     * Kafka ya confirmó: si el marcado falla se reintenta en el momento, con esperas cortas. Si no se logra, el evento
+     * queda EN_PROCESO, vuelve a reintento al vencer el lease y se publica otra vez (el consumidor descarta el
+     * duplicado por {@code eventId}).
+     */
+    private void marcarEnviado(final AuditoriaOutboxEvento evento) {
+        RuntimeException ultimo = null;
+        for (int intento = 0; intento <= ESPERAS_MARCADO.size(); intento++) {
+            if (intento > 0 && !pausar(ESPERAS_MARCADO.get(intento - 1))) {
+                break;
+            }
+            try {
+                outbox.marcarEnviado(evento.id(), reloj.instant());
+                return;
+            } catch (RuntimeException e) {
+                ultimo = e;
+            }
+        }
+        log.warn("[AUDITORIA][OUTBOX_SIN_MARCAR] id={} eventId={}: entregado a Kafka pero no se pudo marcar ENVIADO "
+                        + "({}); se publicará duplicado cuando venza su lease (el consumidor lo descarta por eventId)",
+                evento.id(), evento.eventId(), ErrorSaneado.de(ultimo));
+    }
+
+    private boolean pausar(final Duration duracion) {
+        try {
+            pausa.esperar(duracion);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     private void registrarFallo(final AuditoriaOutboxEvento evento, final String error) {

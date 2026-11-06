@@ -4,7 +4,12 @@ import com.factoring.commons.auditoria.AuditoriaAutoConfiguration
 import com.factoring.commons.auditoria.AuditoriaPort
 import com.factoring.commons.auditoria.outbox.jdbc.JdbcAuditoriaOutboxAdapter
 import com.factoring.commons.auditoria.outbox.mongo.MongoAuditoriaOutboxAdapter
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.binder.MeterBinder
 import net.javacrumbs.shedlock.core.LockProvider
+import org.springframework.boot.actuate.autoconfigure.metrics.CompositeMeterRegistryAutoConfiguration
+import org.springframework.boot.actuate.autoconfigure.metrics.MetricsAutoConfiguration
+import org.springframework.boot.actuate.autoconfigure.metrics.export.simple.SimpleMetricsExportAutoConfiguration
 import org.springframework.boot.autoconfigure.AutoConfigurations
 import org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
 import org.springframework.boot.test.context.FilteredClassLoader
@@ -143,6 +148,40 @@ class AuditoriaOutboxAutoConfigurationSpec extends Specification {
                 .withBean("propio", AuditoriaPort, { propio })
                 .withPropertyValues("auditoria.outbox.enabled=true", "auditoria.outbox.almacen=jdbc")
                 .run { ctx -> assert ctx.getBeansOfType(AuditoriaPort).values() as List == [propio] }
+    }
+
+    def "con Micrometer (Actuator) registra las gauges con el tag del servicio; leerlas no consulta la base"() {
+        given:
+        AuditoriaOutboxPort outbox = Stub() {
+            resumen() >> new ResumenOutbox(3, 1, null)
+        }
+
+        expect:
+        conOutbox.withConfiguration(AutoConfigurations.of(MetricsAutoConfiguration,
+                SimpleMetricsExportAutoConfiguration, CompositeMeterRegistryAutoConfiguration))
+                .withBean("outbox", AuditoriaOutboxPort, { outbox })
+                .withPropertyValues("auditoria.outbox.enabled=true", "auditoria.outbox.almacen=jdbc")
+                .run { ctx ->
+                    assert ctx.startupFailure == null
+                    def registro = ctx.getBean(MeterRegistry)
+                    ctx.getBean(AuditoriaOutboxEstadisticas).actualizarSeguro()
+                    assert registro.get(AuditoriaOutboxMetricas.PENDIENTES).tag("servicio", "ms-prueba").gauge().value() == 3
+                    assert registro.get(AuditoriaOutboxMetricas.FALLIDOS).tag("servicio", "ms-prueba").gauge().value() == 1
+                    assert registro.get(AuditoriaOutboxMetricas.EDAD).tag("servicio", "ms-prueba").gauge().value() == 0
+                }
+    }
+
+    def "sin Micrometer en el classpath arranca igual y no registra las métricas"() {
+        expect:
+        conOutbox.withClassLoader(new FilteredClassLoader(MeterBinder))
+                .withBean("dataSource", DataSource, { Mock(DataSource) })
+                .withPropertyValues("auditoria.outbox.enabled=true", "auditoria.outbox.almacen=jdbc")
+                .run { ctx ->
+                    assert ctx.startupFailure == null
+                    assert ctx.getBeanNamesForType(AuditoriaOutboxEstadisticas).length == 1
+                    assert !ctx.containsBean("auditoriaOutboxMetricas")
+                    assert !ctx.getBean(AuditoriaOutboxEstadisticas).activa
+                }
     }
 
     private static List<Throwable> causas(Throwable error) {

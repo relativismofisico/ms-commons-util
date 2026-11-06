@@ -10,6 +10,7 @@ import com.factoring.commons.auditoria.EntidadTipo
 import spock.lang.Specification
 
 import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -43,6 +44,9 @@ abstract class OutboxIntegracionBase extends Specification {
     abstract long noEnviados()
 
     abstract void vaciar()
+
+    /** Fuerza el estado de un evento (lo que haría un operador o un relay a medias). */
+    abstract void forzar(String eventId, EstadoOutbox estado, int intentos, Instant proximoIntento, Instant leaseHasta)
 
     def setup() {
         vaciar()
@@ -365,5 +369,162 @@ abstract class OutboxIntegracionBase extends Specification {
         !outbox().marcarEnviado(reclamado.id(), reloj.instant())
         outbox().buscarLeasesVencidos(reloj.instant().plus(Duration.ofDays(1)), 10).isEmpty()
         outbox().limpiarEnviadosAnteriores(reloj.instant().minus(Duration.ofDays(1)), 10) == 0
+    }
+
+    // ── Marcado tras el ack con reintentos locales ───────────────────────────
+
+    /** Almacén real cuyo marcarEnviado falla las primeras {@code fallos} veces. */
+    static class MarcadoQueFalla implements AuditoriaOutboxPort {
+        @Delegate
+        final AuditoriaOutboxPort real
+        int fallos
+
+        MarcadoQueFalla(AuditoriaOutboxPort real, int fallos) {
+            this.real = real
+            this.fallos = fallos
+        }
+
+        @Override
+        boolean marcarEnviado(String id, Instant fechaEnvio) {
+            if (fallos-- > 0) {
+                throw new IllegalStateException("bd caída al marcar")
+            }
+            real.marcarEnviado(id, fechaEnvio)
+        }
+    }
+
+    def "marcarEnviado falla dos veces y luego funciona: queda ENVIADO sin duplicar"() {
+        given:
+        def e = evento("MR-1")
+        puerto().registrar(e)
+        def grabador = new Grabador()
+        def relay = new OutboxAuditoriaRelay(new MarcadoQueFalla(outbox(), 2), grabador, propiedades, reloj, {})
+
+        when:
+        relay.ejecutarCiclo()
+        reloj.avanzar(propiedades.lease.plusSeconds(1))
+        relay.ejecutarCiclo()
+
+        then:
+        leer(e.eventId()).estado() == EstadoOutbox.ENVIADO
+        grabador.ids() == [e.eventId()]
+    }
+
+    def "marcarEnviado falla siempre: vuelve a reintento al vencer el lease y sale duplicado"() {
+        given:
+        def e = evento("MR-2")
+        puerto().registrar(e)
+        def grabador = new Grabador()
+        def roto = new MarcadoQueFalla(outbox(), Integer.MAX_VALUE)
+
+        when:
+        new OutboxAuditoriaRelay(roto, grabador, propiedades, reloj, {}).ejecutarCiclo()
+
+        then:
+        leer(e.eventId()).estado() == EstadoOutbox.EN_PROCESO
+
+        when: "vence el lease, pasa el backoff y el almacén vuelve"
+        reloj.avanzar(propiedades.lease.plusSeconds(1))
+        relay(grabador).ejecutarCiclo()
+        def despuesDelLease = leer(e.eventId())
+        reloj.avanzar(Duration.ofSeconds(2))
+        relay(grabador).ejecutarCiclo()
+
+        then:
+        despuesDelLease.estado() == EstadoOutbox.PENDIENTE
+        despuesDelLease.ultimoError() == ErrorSaneado.LEASE_VENCIDO
+        leer(e.eventId()).estado() == EstadoOutbox.ENVIADO
+        grabador.ids() == [e.eventId(), e.eventId()]
+    }
+
+    def "resumen: pendientes (PENDIENTE y EN_PROCESO), fallidos y el pendiente más antiguo"() {
+        expect:
+        outbox().resumen() == ResumenOutbox.VACIO
+
+        when:
+        def viejo = evento("RS-1")
+        puerto().registrar(viejo)
+        reloj.avanzar(Duration.ofSeconds(10))
+        def fallido = evento("RS-2")
+        puerto().registrar(fallido)
+        puerto().registrar(evento("RS-3"))
+        forzar(fallido.eventId(), EstadoOutbox.FALLIDO, 3, reloj.instant(), null)
+        outbox().tomarLote(1, reloj.instant(), reloj.instant().plus(propiedades.lease))
+
+        then:
+        outbox().resumen() == new ResumenOutbox(2, 1, reloj.instant().minusSeconds(10))
+    }
+
+    // ── Inanición: claves bloqueadas delante no pueden frenar a las demás ─────
+
+    /** tamanoLote + 10 eventos de la clave A, el primero de ellos devuelto para bloquearlo, y uno de la clave B detrás. */
+    private Map registrarBloqueoDelante(String prefijo) {
+        def a = (1..propiedades.tamanoLote + 11).collect { evento(prefijo + "-A") }
+        a.each { puerto().registrar(it) }
+        def b = evento(prefijo + "-B")
+        puerto().registrar(b)
+        [a: a, b: b]
+    }
+
+    def "inanición (a): un FALLIDO de A con tamanoLote+10 sucesores no impide publicar B en el primer ciclo"() {
+        given:
+        def eventos = registrarBloqueoDelante("IA")
+        forzar(eventos.a[0].eventId(), EstadoOutbox.FALLIDO, propiedades.maxIntentos, reloj.instant(), null)
+        def grabador = new Grabador()
+
+        when:
+        relay(grabador).ejecutarCiclo()
+
+        then:
+        grabador.ids() == [eventos.b.eventId()]
+        eventos.a.drop(1).every { leer(it.eventId()).estado() == EstadoOutbox.PENDIENTE }
+    }
+
+    def "inanición (b): un evento de A en backoff con tamanoLote+10 sucesores no frena a B; los de A no salen"() {
+        given:
+        def eventos = registrarBloqueoDelante("IB")
+        forzar(eventos.a[0].eventId(), EstadoOutbox.PENDIENTE, 1, reloj.instant().plusSeconds(60), null)
+        def grabador = new Grabador()
+
+        when:
+        relay(grabador).ejecutarCiclo()
+
+        then:
+        grabador.ids() == [eventos.b.eventId()]
+        eventos.a.every { leer(it.eventId()).estado() == EstadoOutbox.PENDIENTE }
+    }
+
+    def "inanición (c): un EN_PROCESO de A con lease vigente bloquea a sus sucesores, no a B"() {
+        given:
+        def eventos = registrarBloqueoDelante("IC")
+        forzar(eventos.a[0].eventId(), EstadoOutbox.EN_PROCESO, 0, reloj.instant(), reloj.instant().plus(propiedades.lease))
+        def grabador = new Grabador()
+
+        when:
+        relay(grabador).ejecutarCiclo()
+
+        then:
+        grabador.ids() == [eventos.b.eventId()]
+        leer(eventos.a[0].eventId()).estado() == EstadoOutbox.EN_PROCESO
+        eventos.a.drop(1).every { leer(it.eventId()).estado() == EstadoOutbox.PENDIENTE }
+    }
+
+    def "inanición (d): resuelto el FALLIDO (reintento manual), A sale completa y en orden"() {
+        given:
+        def eventos = registrarBloqueoDelante("ID")
+        forzar(eventos.a[0].eventId(), EstadoOutbox.FALLIDO, propiedades.maxIntentos, reloj.instant(), null)
+        def grabador = new Grabador()
+        relay(grabador).ejecutarCiclo()
+
+        when: "el operador lo devuelve a PENDIENTE con intentos = 0"
+        forzar(eventos.a[0].eventId(), EstadoOutbox.PENDIENTE, 0, reloj.instant(), null)
+        int ciclos = 0
+        while (noEnviados() > 0 && ciclos++ < 10) {
+            relay(grabador).ejecutarCiclo()
+        }
+
+        then:
+        noEnviados() == 0
+        grabador.ids() == [eventos.b.eventId()] + eventos.a*.eventId()
     }
 }

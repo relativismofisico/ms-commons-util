@@ -27,7 +27,8 @@ class OutboxAuditoriaRelaySpec extends Specification {
     AuditoriaOutboxProperties propiedades = new AuditoriaOutboxProperties(
             almacen: AuditoriaOutboxProperties.Almacen.JDBC, maxIntentos: 3, backoffBase: Duration.ofSeconds(5),
             backoffMax: Duration.ofSeconds(60), timeoutAck: Duration.ofSeconds(10), lease: Duration.ofMinutes(5))
-    OutboxAuditoriaRelay relay = new OutboxAuditoriaRelay(outbox, publicador, propiedades, reloj)
+    List<Duration> pausas = []
+    OutboxAuditoriaRelay relay = new OutboxAuditoriaRelay(outbox, publicador, propiedades, reloj, { pausas << it })
 
     ListAppender<ILoggingEvent> logs = new ListAppender<>()
     Logger logger = (Logger) LoggerFactory.getLogger(OutboxAuditoriaRelay)
@@ -301,5 +302,81 @@ class OutboxAuditoriaRelaySpec extends Specification {
         then:
         1 * outbox.buscarLeasesVencidos(_, _) >> []
         1 * outbox.tomarLote(50, ahora, ahora.plus(Duration.ofMinutes(5))) >> []
+    }
+
+    def "marcarEnviado falla dos veces tras el ack: se reintenta en el momento (200 ms, 400 ms) y queda ENVIADO"() {
+        given:
+        def evento = reclamado("1", "A")
+        int llamadas = 0
+
+        when:
+        def enviados = relay.ejecutarCiclo()
+
+        then:
+        1 * outbox.buscarLeasesVencidos(_, _) >> []
+        1 * outbox.tomarLote(_, _, _) >> [evento]
+        1 * publicador.publicarConfirmado(_, _, _)
+        3 * outbox.marcarEnviado("1", _) >> {
+            if (++llamadas < 3) {
+                throw new IllegalStateException("bd")
+            }
+            true
+        }
+        0 * outbox.marcarReintento(*_)
+        pausas == [Duration.ofMillis(200), Duration.ofMillis(400)]
+        enviados == 1
+        logs.list.isEmpty()
+    }
+
+    def "marcarEnviado falla siempre: tras 3 intentos WARN de entregado a Kafka y duplicado al vencer el lease"() {
+        given:
+        def evento = reclamado("1", "A")
+        def otro = reclamado("2", "A")
+
+        when:
+        relay.ejecutarCiclo()
+
+        then:
+        1 * outbox.buscarLeasesVencidos(_, _) >> []
+        1 * outbox.tomarLote(_, _, _) >> [evento, otro]
+        2 * publicador.publicarConfirmado(_, _, _)
+        3 * outbox.marcarEnviado("1", _) >> { throw new IllegalStateException("jdbc:secreto") }
+        1 * outbox.marcarEnviado("2", _) >> true
+        0 * outbox.marcarReintento(*_)
+        0 * outbox.liberar(_)
+        def warn = logs.list.find { it.level.toString() == "WARN" }
+        warn.formattedMessage.contains("OUTBOX_SIN_MARCAR")
+        warn.formattedMessage.contains("entregado a Kafka")
+        warn.formattedMessage.contains("duplicado")
+        warn.formattedMessage.contains(evento.eventId())
+        !mensajes().contains("jdbc:secreto")
+        !mensajes().contains(DATO_SENSIBLE)
+    }
+
+    def "si interrumpen la pausa entre marcados, deja de reintentar y conserva la interrupción"() {
+        given:
+        def evento = reclamado("1", "A")
+        def interrumpible = new OutboxAuditoriaRelay(outbox, publicador, propiedades, reloj,
+                { throw new InterruptedException() })
+
+        when:
+        interrumpible.ejecutarCiclo()
+
+        then:
+        1 * outbox.buscarLeasesVencidos(_, _) >> []
+        1 * outbox.tomarLote(_, _, _) >> [evento]
+        1 * publicador.publicarConfirmado(_, _, _)
+        1 * outbox.marcarEnviado("1", _) >> { throw new IllegalStateException("bd") }
+        Thread.interrupted()
+        logs.list.any { it.formattedMessage.contains("OUTBOX_SIN_MARCAR") }
+    }
+
+    def "la pausa real duerme el hilo"() {
+        when:
+        long inicio = System.nanoTime()
+        OutboxAuditoriaRelay.Pausa.DORMIR.esperar(Duration.ofMillis(20))
+
+        then:
+        System.nanoTime() - inicio >= 15_000_000
     }
 }

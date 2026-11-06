@@ -13,7 +13,7 @@ plugins {
 }
 
 group = 'com.factoring'
-version = '0.5.0'
+version = '0.5.1'
 
 java {
     toolchain {
@@ -70,12 +70,14 @@ dependencies {
     compileOnly 'com.fasterxml.jackson.core:jackson-databind'
     compileOnly 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
     // Outbox de auditoría (0.5.0): cada almacén se registra solo si el servicio trae su clase (JDBC o Mongo), y
-    // ShedLock solo si ya lo usa (bloqueo de la limpieza). Ninguno es obligatorio.
+    // ShedLock solo si ya lo usa (bloqueo de la limpieza) y Micrometer solo si lo tiene (gauges). Ninguno es
+    // obligatorio.
     compileOnly 'org.springframework:spring-tx'
     compileOnly 'org.springframework:spring-jdbc'
     compileOnly 'org.springframework.data:spring-data-mongodb'
     compileOnly 'org.mongodb:mongodb-driver-sync'
     compileOnly 'net.javacrumbs.shedlock:shedlock-core:5.13.0'
+    compileOnly 'io.micrometer:micrometer-core'
 
     compileOnly 'org.projectlombok:lombok'
     annotationProcessor 'org.projectlombok:lombok'
@@ -103,6 +105,8 @@ dependencies {
     testImplementation 'org.springframework.data:spring-data-mongodb'
     testImplementation 'org.mongodb:mongodb-driver-sync'
     testImplementation 'net.javacrumbs.shedlock:shedlock-core:5.13.0'
+    testImplementation 'io.micrometer:micrometer-core'
+    testImplementation 'org.springframework.boot:spring-boot-actuator-autoconfigure'
     // Integración del outbox contra MySQL, Mongo (replica set de un nodo) y Kafka reales
     testImplementation 'org.testcontainers:testcontainers'
     testImplementation 'org.testcontainers:mysql'
@@ -128,8 +132,28 @@ dependencies {
 
 test {
     useJUnitPlatform()
+    // Zona fija: el resultado no depende de la máquina. testIntegracionBogota repite la integración en otra zona.
+    systemProperty 'user.timezone', 'UTC'
     finalizedBy jacocoTestReport
 }
+
+// Integración del outbox otra vez con la JVM fuera de UTC: las fechas del outbox se guardan y comparan en UTC siempre.
+tasks.register('testIntegracionBogota', Test) {
+    description = 'Pruebas de integración del outbox con user.timezone=America/Bogota.'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform()
+    systemProperty 'user.timezone', 'America/Bogota'
+    filter {
+        includeTestsMatching '*IntegracionSpec'
+    }
+    mustRunAfter test
+    jacoco {
+        enabled = false
+    }
+}
+check.dependsOn testIntegracionBogota
 
 checkstyle {
     toolVersion = '10.20.2'

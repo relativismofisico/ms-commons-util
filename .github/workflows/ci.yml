@@ -30,7 +30,7 @@ jobs:
         run: chmod +x gradlew
 
       - name: Checkstyle, PMD, SpotBugs y tests
-        run: ./gradlew checkstyleMain pmdMain spotbugsMain test --no-daemon
+        run: ./gradlew checkstyleMain pmdMain spotbugsMain test testIntegracionBogota --no-daemon
 
       - name: Subir reportes de calidad
         if: always()

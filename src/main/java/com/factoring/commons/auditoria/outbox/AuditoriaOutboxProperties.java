@@ -24,6 +24,7 @@ public class AuditoriaOutboxProperties {
     private static final int ESPERA_ACK_S_POR_DEFECTO = 30;
     private static final int BACKOFF_MAX_MIN_POR_DEFECTO = 10;
     private static final int CINCO = 5;
+    private static final int METRICAS_S_POR_DEFECTO = 30;
 
     /** Almacenes soportados. */
     public enum Almacen {
@@ -60,6 +61,9 @@ public class AuditoriaOutboxProperties {
     /** Pausa entre limpiezas. */
     private Duration intervaloLimpieza = Duration.ofHours(1);
 
+    /** Pausa entre lecturas del almacén para las métricas (solo con Micrometer). */
+    private Duration intervaloMetricas = Duration.ofSeconds(METRICAS_S_POR_DEFECTO);
+
     /** Cuánto tiempo un relay retiene un lote reclamado; tiene que superar a {@code timeoutAck}. */
     private Duration lease = Duration.ofMinutes(CINCO);
 
@@ -83,6 +87,7 @@ public class AuditoriaOutboxProperties {
         exigir(maxIntentos > 0, "max-intentos tiene que ser mayor que 0");
         exigirPositiva(intervalo, "intervalo");
         exigirPositiva(intervaloLimpieza, "intervalo-limpieza");
+        exigirPositiva(intervaloMetricas, "intervalo-metricas");
         exigirPositiva(backoffBase, "backoff-base");
         exigirPositiva(retencion, "retencion");
         exigirPositiva(timeoutAck, "timeout-ack");

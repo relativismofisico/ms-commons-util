@@ -19,7 +19,7 @@ La definición de terminado de la plataforma está en [DEFINITION_OF_DONE.md](DE
 
 ---
 
-## Outbox de auditoría (0.5.0)
+## Outbox de auditoría (0.5.0; corregido en 0.5.1)
 
 ### Qué resuelve
 
@@ -59,19 +59,36 @@ En cada ciclo (`auditoria.outbox.intervalo`):
 1. **Leases vencidos.** Un evento `EN_PROCESO` con `leaseHasta` vencido es uno que un relay reclamó y no llegó a marcar
    (cayó a medias). Vuelve a `PENDIENTE` contando un intento, con backoff, y `ultimoError = LEASE_VENCIDO`; si agotó
    los intentos pasa a `FALLIDO`.
-2. **Reclamo del lote**, en orden de creación, con lease `ahora + auditoria.outbox.lease`:
-   - JDBC: transacción propia y corta en READ COMMITTED con `SELECT ... FOR UPDATE SKIP LOCKED`; la publicación ocurre
-     **fuera** de esa transacción.
-   - Mongo: `findAndModify` documento a documento, condicionado a `estado = PENDIENTE`.
+2. **Reclamo del lote**, en orden de creación, con lease `ahora + auditoria.outbox.lease`. Los candidatos son los
+   `PENDIENTE` listos (`proximoIntento <= ahora`) **sin un anterior de su clave que no pueda ir en este lote**: un
+   `FALLIDO`, un `EN_PROCESO` o un `PENDIENTE` todavía en backoff. Ese filtro se aplica **antes** del límite del lote,
+   así que una clave bloqueada nunca ocupa el lote de las demás (ver «Corrección 0.5.1»):
+   - JDBC: transacción propia y corta en READ COMMITTED con `SELECT ... WHERE NOT EXISTS (anterior bloqueante) ...
+     FOR UPDATE SKIP LOCKED`; el `NOT EXISTS` usa el índice `(clave_kafka, estado, id)` y no bloquea filas. La
+     publicación ocurre **fuera** de esa transacción.
+   - Mongo: agregación con `$lookup` sobre la misma colección (el mismo filtro) y después `findAndModify` documento a
+     documento, condicionado a `estado = PENDIENTE`.
    - Dos relays nunca reciben el mismo evento.
 3. **Orden por clave Kafka.** Un evento solo se toma si todos los anteriores no enviados de su misma `claveKafka`
-   (`<entidad.tipo>:<entidad.id>`) también están en el lote. Ante el primer fallo de una clave, los siguientes de esa
-   clave en el lote se liberan sin publicar.
+   (`<entidad.tipo>:<entidad.id>`) también están en el lote (un anterior pendiente y listo puede ir en el mismo lote).
+   Ante el primer fallo de una clave, los siguientes de esa clave en el lote se liberan sin publicar.
 4. **Publicación** con `publicarConfirmado` y espera acotada (`auditoria.outbox.timeout-ack`). Solo tras el ack se marca
    `ENVIADO`. Si falla: `intentos + 1` y `proximoIntento = ahora + backoff`, con
    `backoff = backoff-base * 2^(intentos-1)` y tope `backoff-max`. Al llegar a `max-intentos` pasa a `FALLIDO` con un log
    `ERROR` `[AUDITORIA][OUTBOX_FALLIDO]` que lleva id, `eventId`, clave, intentos y causa, **nunca el payload**.
 5. Si al relay ya no le queda lease para esperar un ack completo, libera el resto del lote sin publicarlo.
+6. **Marcado tras el ack.** Si `marcarEnviado` falla después de que Kafka confirmó, se reintenta en el momento hasta 3
+   veces (esperas de 200 ms y 400 ms). Si aun así falla, un log `WARN` `[AUDITORIA][OUTBOX_SIN_MARCAR]` avisa que el
+   evento **ya fue entregado a Kafka** y que saldrá duplicado cuando venza su lease (el consumidor lo descarta por
+   `eventId`).
+
+### Corrección 0.5.1: una clave bloqueada ya no frena todo el outbox
+
+En 0.5.0 el lote se cortaba (`LIMIT tamano-lote`) **antes** de aplicar el orden por clave. Si los primeros
+`tamano-lote` pendientes eran sucesores de un evento bloqueado (un `FALLIDO`, uno en backoff o uno `EN_PROCESO`), el lote
+quedaba vacío y el relay no publicaba nada, aunque hubiera eventos de otras claves esperando: un solo `FALLIDO` (un
+payload ilegible lo es al primer intento) con `tamano-lote` o más eventos detrás detenía todo el outbox del servicio. Los
+dos almacenes lo tenían. En 0.5.1 el filtro va dentro de la consulta de candidatos, antes del límite.
 
 Los marcados exigen el mismo lease que se reclamó: un relay con el lease vencido no pisa lo que hizo otro. Si una
 instancia cae entre el ack y el marcado, el evento sale dos veces con el mismo `eventId` y el consumidor descarta el
@@ -97,6 +114,7 @@ solo se repite el trabajo).
 | `auditoria.outbox.timeout-ack` | `30s` | Espera máxima del ack de Kafka por evento |
 | `auditoria.outbox.retencion` | `30d` | Antigüedad de los `ENVIADO` que se borran |
 | `auditoria.outbox.intervalo-limpieza` | `1h` | Pausa entre limpiezas (y `lockAtMostFor` del bloqueo) |
+| `auditoria.outbox.intervalo-metricas` | `30s` | Pausa entre lecturas del almacén para las métricas (solo con Micrometer) |
 | `auditoria.outbox.mongo.coleccion` | `auditoria_outbox_<spring.application.name>` | Colección del outbox (solo Mongo) |
 
 `auditoria.topic` y `auditoria.enabled` siguen valiendo: el outbox usa el mismo `AuditoriaPublisher`, así que
@@ -131,8 +149,8 @@ CREATE TABLE auditoria_outbox (
 ```
 
 - `id` autoincremental define el orden. `event_id` único impide guardar dos veces el mismo evento.
-- Las fechas se guardan en milisegundos y se comparan contra el reloj de la aplicación, no contra `NOW()`; todas las
-  instancias de un servicio deben correr con la misma zona horaria de JVM (UTC en los contenedores).
+- Las fechas se guardan en milisegundos y **en UTC**, y se comparan contra el reloj de la aplicación, no contra
+  `NOW()` (ver «Tiempo en UTC»).
 - La limpieza usa `DELETE ... ORDER BY id LIMIT n`, propio de MySQL.
 
 ### Almacén Mongo: colección e índices
@@ -149,7 +167,7 @@ CREATE TABLE auditoria_outbox (
 | `ix_auditoria_outbox_clave` | `{claveKafka: 1, estado: 1, fechaCreacion: 1}` | Orden por clave |
 | `ix_auditoria_outbox_limpieza` | `{estado: 1, fechaEnvio: 1}` | Limpieza |
 
-- El orden es `fechaCreacion` y después `_id`.
+- El orden es `fechaCreacion` y después `_id`. Mongo guarda las fechas en UTC siempre (tipo `Date`).
 - Para que el evento y el cambio de negocio sean atómicos, el servicio necesita un **`MongoTransactionManager`** y Mongo
   en **replica set** (también de un nodo). Sin transacción de Mongo, el insert del outbox se confirma solo: el evento
   queda duradero, pero ya no atado al cambio de negocio (ventana de escritura doble, menor que la de hoy).
@@ -158,7 +176,7 @@ CREATE TABLE auditoria_outbox (
 
 Pasos comunes:
 
-1. Subir `ms-commons-util` a `0.5.0`.
+1. Subir `ms-commons-util` a `0.5.1` (no a 0.5.0: ver «Corrección 0.5.1»).
 2. Agregar `auditoria.outbox.enabled=true` y `auditoria.outbox.almacen=jdbc|mongo` (por ambiente; se puede empezar
    apagado).
 3. Hacer que el adaptador de auditoría del servicio delegue en el `AuditoriaPort` de commons cuando existe, y mantener
@@ -196,34 +214,144 @@ Pasos comunes:
 | ms-postliquidacion-util | `mongo` | Igual que cargaFacturas; Mongo es su única base |
 
 Los servicios que ya tienen su propio outbox en `outbox_event` (security, negociador, liquidador) no se tocan en
-0.5.0. Migrarlos al relay de commons es un trabajo aparte.
+0.5.x. Migrarlos al relay de commons es un trabajo aparte.
 
-### Operación
+#### Dependencias que tiene que traer cada servicio
 
-- **`FALLIDO` bloquea su clave.** Los eventos siguientes de la misma entidad no salen hasta revisarlo (es lo que
-  conserva el orden). Para reintentarlo, devolverlo a `PENDIENTE` con `intentos = 0` y `proximo_intento` en el pasado;
-  si se decide descartarlo, borrarlo. Cada `FALLIDO` deja un log `ERROR` `[AUDITORIA][OUTBOX_FALLIDO]`.
-- Métricas mínimas que conviene vigilar: cantidad de `PENDIENTE` con `proximo_intento` vencido, cantidad de `FALLIDO`,
-  y antigüedad del `PENDIENTE` más viejo.
+Todas las dependencias de commons son `compileOnly`: el servicio las pone en tiempo de ejecución.
+
+| Para | Dependencias (o el starter que las trae) |
+|---|---|
+| Siempre (auditoría) | `spring-boot-autoconfigure`, `spring-kafka`, `jackson-databind`, `jackson-datatype-jsr310`, `slf4j-api` (los traen `spring-boot-starter` + `spring-kafka`) |
+| Almacén `jdbc` | `spring-jdbc` y `spring-tx` (`spring-boot-starter-jdbc` o `spring-boot-starter-data-jpa`), un `DataSource` y `mysql-connector-j` 8.0.23 o más nuevo |
+| Almacén `mongo` | `spring-data-mongodb` y `mongodb-driver-sync` (`spring-boot-starter-data-mongodb`) y un `MongoTemplate`; para atomicidad, un `MongoTransactionManager` con replica set |
+| Bloqueo de la limpieza (opcional) | `shedlock-core` (lo trae `shedlock-spring`) y un bean `LockProvider` |
+| Métricas (opcional) | `micrometer-core` y Spring Boot Actuator (`spring-boot-starter-actuator`) |
+
+### Tiempo en UTC
+
+Los cuatro instantes del outbox (`proximo_intento`, `lease_hasta`, `fecha_creacion`, `fecha_envio`) se guardan y se
+comparan en **UTC**, sin depender de la zona de la JVM ni de la de la sesión de MySQL:
+
+- JDBC: viajan como `LocalDateTime` en UTC. Connector/J (8.0.23 o más nuevo) no convierte `LocalDateTime` ni con la zona
+  de la JVM ni con la de la sesión, y `DATETIME` no tiene zona. **No hace falta ningún parámetro de conexión**
+  (`connectionTimeZone`, `preserveInstants`, `forceConnectionTimeZoneToSession`): los valores por defecto sirven.
+  Al consultar a mano, comparar contra `UTC_TIMESTAMP(3)`, no contra `NOW()`.
+- Mongo: `Date` es UTC siempre.
+- Las pruebas de integración corren con la JVM en UTC y otra vez en `America/Bogota` (`testIntegracionBogota`), y la
+  sesión de MySQL de las pruebas está en `+05:00`.
+
+### Métricas
+
+Si el servicio tiene Micrometer y Actuator, se registran tres gauges con el tag `servicio=<spring.application.name>`:
+
+| Gauge | Qué mide | Alerta sugerida |
+|---|---|---|
+| `auditoria.outbox.pendientes` | Eventos `PENDIENTE` y `EN_PROCESO` | Crece sin bajar |
+| `auditoria.outbox.fallidos` | Eventos `FALLIDO` | **Mayor que 0**: hay una clave detenida |
+| `auditoria.outbox.edad_mas_antiguo_segundos` | Segundos que lleva esperando el pendiente más antiguo | Por encima de unos minutos |
+
+Leer las gauges no consulta la base: el planificador lee el almacén cada `intervalo-metricas`, y solo si las gauges
+están registradas. Sin Micrometer no se registra nada y no hay consultas de más. El log `ERROR`
+`[AUDITORIA][OUTBOX_FALLIDO]` de cada `FALLIDO` se mantiene.
+
+### Runbook: eventos FALLIDO
+
+> **Un `FALLIDO` bloquea todos los eventos posteriores de su misma clave Kafka** (la misma entidad). No se
+> publican hasta resolverlo; los de las demás claves siguen saliendo.
+
+Un evento pasa a `FALLIDO` al agotar `max-intentos` (Kafka caído mucho tiempo, topic inexistente) o al primer intento si
+su payload no se puede leer (`ultimoError = PAYLOAD_ILEGIBLE`). El payload lleva ip, actor y detalle: no copiarlo a
+canales abiertos.
+
+**MySQL** (tabla `auditoria_outbox`):
+
+```sql
+-- Ver los FALLIDO (sin el payload) y cuántos eventos tiene detenidos cada uno detrás
+SELECT id, event_id, clave_kafka, intentos, ultimo_error, fecha_creacion
+FROM auditoria_outbox WHERE estado = 'FALLIDO' ORDER BY id;
+
+SELECT f.id, f.clave_kafka, COUNT(p.id) AS detenidos
+FROM auditoria_outbox f
+JOIN auditoria_outbox p ON p.clave_kafka = f.clave_kafka AND p.id > f.id AND p.estado = 'PENDIENTE'
+WHERE f.estado = 'FALLIDO' GROUP BY f.id, f.clave_kafka;
+
+-- Reintentar uno (después de corregir la causa): vuelve a la cola con intentos en 0
+UPDATE auditoria_outbox
+SET estado = 'PENDIENTE', intentos = 0, proximo_intento = UTC_TIMESTAMP(3), ultimo_error = NULL
+WHERE id = :id AND estado = 'FALLIDO';
+
+-- Descartarlo (decisión explícita: el evento no llegará a la auditoría). Guardar antes el payload en el mismo
+-- destino restringido que el logger AUDITORIA_NO_PUBLICADO.
+DELETE FROM auditoria_outbox WHERE id = :id AND estado = 'FALLIDO';
+```
+
+**Mongo** (colección `auditoria_outbox_<servicio>`, desde `mongosh`):
+
+```javascript
+// Ver los FALLIDO, sin el payload
+db.getCollection("auditoria_outbox_<servicio>")
+  .find({ estado: "FALLIDO" }, { payload: 0 }).sort({ fechaCreacion: 1, _id: 1 })
+
+// Reintentar uno
+db.getCollection("auditoria_outbox_<servicio>").updateOne(
+  { _id: ObjectId("<id>"), estado: "FALLIDO" },
+  { $set: { estado: "PENDIENTE", intentos: 0, proximoIntento: new Date(), ultimoError: null } })
+
+// Descartarlo (guardar antes el payload en el destino restringido)
+db.getCollection("auditoria_outbox_<servicio>").deleteOne({ _id: ObjectId("<id>"), estado: "FALLIDO" })
+```
+
+Al reintentar o descartar el `FALLIDO`, sus sucesores salen en orden en los ciclos siguientes. Si vuelve a fallar, volverá
+a `FALLIDO` al agotar los intentos.
 
 ### Limitaciones conocidas
 
-- El orden por clave es el orden **de inserción visible**. Si dos transacciones concurrentes auditan la misma entidad
-  sin bloquearla, la que confirma primero puede salir primero aunque se haya insertado después. Los casos de uso que
-  necesiten orden estricto por entidad deben bloquear la entidad (como ya hace security con `lockForUpdate`).
-- Un evento sale como mínimo una vez: puede repetirse si el relay cae entre el ack y el marcado, y el consumidor lo
-  descarta por `eventId`.
+- **Orden de inserción visible, no de commit.** El orden por clave es el de inserción tal como lo ve el relay. Si dos
+  transacciones concurrentes auditan la misma entidad sin bloquearla, la que confirma primero puede salir primero
+  aunque se haya insertado después. El consumidor ordena por `occurredAt` (cuándo ocurrió la acción), no por el orden
+  de llegada. Los casos de uso que necesiten orden estricto de publicación por entidad deben bloquear la entidad (como
+  ya hace security con `lockForUpdate`).
+- **Al menos una vez.** Un evento puede repetirse si el relay cae entre el ack y el marcado, o si el marcado falla tres
+  veces seguidas; el consumidor lo descarta por `eventId`.
+- **UTC.** El outbox guarda y compara en UTC; quien consulte o edite a mano tiene que usar UTC (`UTC_TIMESTAMP(3)` en
+  MySQL).
 - El almacén JDBC está escrito y probado para MySQL 8 (`SKIP LOCKED`, `DELETE ... LIMIT`).
 
 ### Pruebas
 
 - Unitarias del relay (`OutboxAuditoriaRelaySpec`): lote vacío, éxito, fallo con backoff, tope de intentos a `FALLIDO`,
-  lease vencido, orden por clave con fallo en medio, error saneado sin payload, payload ilegible, lease agotado.
+  lease vencido, orden por clave con fallo en medio, error saneado sin payload, payload ilegible, lease agotado,
+  reintentos del marcado tras el ack.
 - Integración con Testcontainers (`JdbcAuditoriaOutboxIntegracionSpec` contra MySQL 8,
   `MongoAuditoriaOutboxIntegracionSpec` contra Mongo 7 en replica set de un nodo, Kafka real `apache/kafka`):
   transacción confirmada y revertida, sin transacción, `eventId` repetido, dos relays concurrentes sin duplicar y en
-  orden por clave, caída entre reclamar y publicar, Kafka caído (pausado) y su vuelta, limpieza, `SKIP LOCKED`.
+  orden por clave, caída entre reclamar y publicar, Kafka caído (pausado) y su vuelta, limpieza, `SKIP LOCKED`, claves
+  bloqueadas que no frenan a las demás (FALLIDO, backoff y EN_PROCESO delante de `tamano-lote + 10` sucesores),
+  marcado que falla tras el ack, resumen de métricas y fechas en UTC.
 - `AuditoriaOutboxAutoConfigurationSpec`: con `enabled=false` el contexto tiene exactamente los mismos beans que sin la
-  autoconfiguración del outbox.
-- Necesitan Docker. En una máquina con Docker Desktop cuyo `docker.host` no sea `localhost`, exportar
-  `TESTCONTAINERS_HOST_OVERRIDE=localhost` antes de correr `./gradlew check`.
+  autoconfiguración del outbox; gauges con y sin Micrometer.
+
+### Correr los tests en local
+
+Necesitan Docker. Desde la raíz del repo:
+
+```bash
+export TESTCONTAINERS_HOST_OVERRIDE=localhost
+./gradlew check --no-daemon "-Dorg.gradle.jvmargs=-Xmx768m -Dfile.encoding=UTF-8"
+```
+
+- `TESTCONTAINERS_HOST_OVERRIDE=localhost`: con Docker Desktop, si `~/.testcontainers.properties` define un
+  `docker.host` que no es `localhost`, los contenedores anuncian una dirección que no sirve (Kafka no arranca).
+- `-Dfile.encoding=UTF-8`: las fuentes están en UTF-8 y en Windows la JVM compila por defecto en cp1252.
+- Si se desactiva Ryuk (`TESTCONTAINERS_RYUK_DISABLED=true`), las specs paran sus contenedores al terminar; se llaman
+  `integrity-e2e-tc-*` para reconocerlos.
+- `check` corre `test` (JVM en UTC) y `testIntegracionBogota` (la integración otra vez con la JVM en
+  `America/Bogota`).
+
+| Pieza | Versión | Por qué |
+|---|---|---|
+| Testcontainers | 1.21.4 (fijada en `build.gradle`) | La 1.21.3 del BOM de Spring Boot 3.5.4 no habla con Docker Engine 29 (API mínima 1.44) |
+| Kafka | `apache/kafka:3.8.1` | Con la 3.9.0 en modo combinado, el contenedor anuncia el listener del controller en `0.0.0.0` y Kafka no arranca con el `KafkaContainer` de Testcontainers 1.21 |
+| MySQL | `mysql:8.0` | El motor objetivo del almacén JDBC |
+| Mongo | `mongo:7.0` | Replica set de un nodo (`MongoDBContainer`), necesario para las transacciones |

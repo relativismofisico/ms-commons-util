@@ -13,11 +13,14 @@ import com.factoring.commons.auditoria.outbox.AuditoriaOutboxEvento;
 import com.factoring.commons.auditoria.outbox.AuditoriaOutboxPort;
 import com.factoring.commons.auditoria.outbox.EstadoOutbox;
 import com.factoring.commons.auditoria.outbox.OrdenPorClave;
+import com.factoring.commons.auditoria.outbox.ResumenOutbox;
 import org.bson.Document;
 import org.bson.types.ObjectId;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.FindAndModifyOptions;
 import org.springframework.data.mongodb.core.MongoOperations;
+import org.springframework.data.mongodb.core.aggregation.Aggregation;
+import org.springframework.data.mongodb.core.aggregation.AggregationOperation;
 import org.springframework.data.mongodb.core.index.CompoundIndexDefinition;
 import org.springframework.data.mongodb.core.index.Index;
 import org.springframework.data.mongodb.core.index.IndexOperations;
@@ -52,6 +55,7 @@ public class MongoAuditoriaOutboxAdapter implements AuditoriaOutboxPort {
     private static final String CREACION = "fechaCreacion";
     private static final String ENVIO = "fechaEnvio";
     private static final String ERROR = "ultimoError";
+    private static final String BLOQUEOS = "bloqueos";
 
     private static final Sort ORDEN = Sort.by(Sort.Direction.ASC, CREACION).and(Sort.by(Sort.Direction.ASC, ID));
 
@@ -109,9 +113,7 @@ public class MongoAuditoriaOutboxAdapter implements AuditoriaOutboxPort {
 
     @Override
     public List<AuditoriaOutboxEvento> tomarLote(final int tamano, final Instant ahora, final Instant leaseHasta) {
-        final Query pendientes = new Query(Criteria.where(ESTADO).is(EstadoOutbox.PENDIENTE.name())
-                .and(PROXIMO).lte(fecha(ahora))).with(ORDEN).limit(tamano);
-        final List<Document> candidatos = mongo.find(pendientes, Document.class, coleccion);
+        final List<Document> candidatos = candidatos(tamano, fecha(ahora));
         if (candidatos.isEmpty()) {
             return List.of();
         }
@@ -155,6 +157,45 @@ public class MongoAuditoriaOutboxAdapter implements AuditoriaOutboxPort {
         return reclamados;
     }
 
+    /**
+     * Pendientes listos sin un anterior de su clave que NO pueda ir en este lote (FALLIDO, EN_PROCESO o PENDIENTE en
+     * backoff): el equivalente del NOT EXISTS del almacén JDBC, con un {@code $lookup} sobre la misma colección que
+     * usa el índice {@code {claveKafka, estado, fechaCreacion}}. Sin esto, los sucesores de una clave bloqueada
+     * ocupaban todo el {@code limit} y las demás claves no salían nunca.
+     */
+    private List<Document> candidatos(final int tamano, final Date ahora) {
+        final Document anterior = new Document("$or", List.of(
+                new Document("$lt", List.of("$" + CREACION, "$$creacion")),
+                new Document("$and", List.of(new Document("$eq", List.of("$" + CREACION, "$$creacion")),
+                        new Document("$lt", List.of("$" + ID, "$$id"))))));
+        final Document bloquea = new Document("$or", List.of(
+                new Document("$in", List.of("$" + ESTADO,
+                        List.of(EstadoOutbox.FALLIDO.name(), EstadoOutbox.EN_PROCESO.name()))),
+                new Document("$and", List.of(new Document("$eq", List.of("$" + ESTADO, EstadoOutbox.PENDIENTE.name())),
+                        new Document("$gt", List.of("$" + PROXIMO, ahora))))));
+        final Document bloqueos = new Document("from", coleccion)
+                .append("let", new Document("clave", "$" + CLAVE).append("creacion", "$" + CREACION).append("id", "$" + ID))
+                .append("pipeline", List.of(
+                        new Document("$match", new Document("$expr", new Document("$and", List.of(
+                                new Document("$eq", List.of("$" + CLAVE, "$$clave")), anterior, bloquea)))),
+                        new Document("$limit", 1),
+                        new Document("$project", new Document(ID, 1))))
+                .append("as", BLOQUEOS);
+        final List<Document> etapas = List.of(
+                new Document("$match", new Document(ESTADO, EstadoOutbox.PENDIENTE.name())
+                        .append(PROXIMO, new Document("$lte", ahora))),
+                new Document("$sort", new Document(CREACION, 1).append(ID, 1)),
+                new Document("$lookup", bloqueos),
+                new Document("$match", new Document(BLOQUEOS, new Document("$size", 0))),
+                new Document("$limit", tamano),
+                new Document("$project", new Document(BLOQUEOS, 0)));
+        final List<AggregationOperation> operaciones = new ArrayList<>();
+        for (final Document etapa : etapas) {
+            operaciones.add(contexto -> etapa);
+        }
+        return mongo.aggregate(Aggregation.newAggregation(operaciones), coleccion, Document.class).getMappedResults();
+    }
+
     @Override
     public List<AuditoriaOutboxEvento> buscarLeasesVencidos(final Instant ahora, final int limite) {
         final Query vencidos = new Query(Criteria.where(ESTADO).is(EstadoOutbox.EN_PROCESO.name())
@@ -194,6 +235,22 @@ public class MongoAuditoriaOutboxAdapter implements AuditoriaOutboxPort {
     public boolean liberar(final AuditoriaOutboxEvento evento) {
         final Update update = new Update().set(ESTADO, EstadoOutbox.PENDIENTE.name()).set(LEASE, null);
         return mongo.updateFirst(conLease(evento), update, coleccion).getModifiedCount() > 0;
+    }
+
+    @Override
+    public ResumenOutbox resumen() {
+        final Criteria pendientes = Criteria.where(ESTADO).in(EstadoOutbox.PENDIENTE.name(),
+                EstadoOutbox.EN_PROCESO.name());
+        final long cantidad = mongo.count(new Query(pendientes), coleccion);
+        final long fallidos = mongo.count(new Query(Criteria.where(ESTADO).is(EstadoOutbox.FALLIDO.name())), coleccion);
+        final Query masAntiguo = new Query(pendientes).with(ORDEN).limit(1);
+        masAntiguo.fields().include(CREACION);
+        final Document primero = mongo.findOne(masAntiguo, Document.class, coleccion);
+        Instant creacion = null;
+        if (primero != null) {
+            creacion = instante(primero, CREACION);
+        }
+        return new ResumenOutbox(cantidad, fallidos, creacion);
     }
 
     @Override
