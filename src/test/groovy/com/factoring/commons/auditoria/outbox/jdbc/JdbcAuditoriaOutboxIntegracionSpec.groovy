@@ -12,6 +12,11 @@ import org.springframework.transaction.support.TransactionTemplate
 import org.testcontainers.containers.MySQLContainer
 import spock.lang.Shared
 
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+
 /** Outbox JDBC contra MySQL 8 real, con la tabla del SQL de referencia del README. */
 class JdbcAuditoriaOutboxIntegracionSpec extends OutboxIntegracionBase {
 
@@ -32,8 +37,9 @@ class JdbcAuditoriaOutboxIntegracionSpec extends OutboxIntegracionBase {
 
     def setupSpec() {
         mysql.start()
+        // La sesión de MySQL en otra zona que la JVM y que UTC: las fechas no pueden depender de ninguna de las dos.
         dataSource = new HikariDataSource(jdbcUrl: mysql.jdbcUrl, username: mysql.username, password: mysql.password,
-                maximumPoolSize: 10)
+                maximumPoolSize: 10, connectionInitSql: "SET time_zone = '+05:00'")
         jdbc = new JdbcTemplate(dataSource)
         jdbc.execute(getClass().getResource("/auditoria_outbox_mysql.sql").text)
         jdbc.execute("CREATE TABLE negocio (id VARCHAR(64) PRIMARY KEY)")
@@ -74,11 +80,55 @@ class JdbcAuditoriaOutboxIntegracionSpec extends OutboxIntegracionBase {
         def filas = jdbc.query("SELECT * FROM auditoria_outbox WHERE event_id = ?", { rs, n ->
             new AuditoriaOutboxEvento(rs.getString("id"), rs.getString("event_id"), rs.getString("clave_kafka"),
                     rs.getString("topic"), rs.getString("payload"), EstadoOutbox.valueOf(rs.getString("estado")),
-                    rs.getInt("intentos"), rs.getTimestamp("proximo_intento")?.toInstant(),
-                    rs.getTimestamp("lease_hasta")?.toInstant(), rs.getTimestamp("fecha_creacion")?.toInstant(),
-                    rs.getTimestamp("fecha_envio")?.toInstant(), rs.getString("ultimo_error"))
+                    rs.getInt("intentos"), deUtc(rs, "proximo_intento"), deUtc(rs, "lease_hasta"),
+                    deUtc(rs, "fecha_creacion"), deUtc(rs, "fecha_envio"), rs.getString("ultimo_error"))
         }, eventId)
         filas ? filas.first() : null
+    }
+
+    @Override
+    void forzar(String eventId, EstadoOutbox estado, int intentos, Instant proximoIntento, Instant leaseHasta) {
+        jdbc.update("UPDATE auditoria_outbox SET estado = ?, intentos = ?, proximo_intento = ?, lease_hasta = ? "
+                + "WHERE event_id = ?", estado.name(), intentos, utc(proximoIntento), utc(leaseHasta), eventId)
+    }
+
+    private static LocalDateTime utc(Instant instante) {
+        instante == null ? null : LocalDateTime.ofInstant(instante, ZoneOffset.UTC)
+    }
+
+    /** Valor guardado en la columna, tal cual, sin pasar por el driver como fecha. */
+    private String crudo(String eventId, String columna) {
+        jdbc.queryForObject("SELECT DATE_FORMAT(" + columna + ", '%Y-%m-%dT%H:%i:%s.%f') FROM auditoria_outbox "
+                + "WHERE event_id = ?", String, eventId)
+    }
+
+    private static String enUtc(Instant instante) {
+        DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'000'").withZone(ZoneOffset.UTC).format(instante)
+    }
+
+    def "UTC: las fechas se guardan en UTC sin importar la zona de la JVM ni la de la sesión de MySQL"() {
+        given:
+        def e = evento("Z-1")
+        def lease = reloj.instant().plus(propiedades.lease)
+
+        when:
+        puerto().registrar(e)
+        def reclamado = adaptador.tomarLote(10, reloj.instant(), lease).first()
+        adaptador.marcarEnviado(reclamado.id(), reloj.instant().plusSeconds(3))
+        def leido = leer(e.eventId())
+
+        then:
+        TimeZone.default.ID == System.getProperty("user.timezone")
+        crudo(e.eventId(), "fecha_creacion") == enUtc(reloj.instant())
+        crudo(e.eventId(), "proximo_intento") == enUtc(reloj.instant())
+        crudo(e.eventId(), "fecha_envio") == enUtc(reloj.instant().plusSeconds(3))
+        reclamado.leaseHasta() == lease
+        leido.fechaCreacion() == reloj.instant()
+        leido.fechaEnvio() == reloj.instant().plusSeconds(3)
+    }
+
+    private static Instant deUtc(java.sql.ResultSet rs, String columna) {
+        rs.getObject(columna, LocalDateTime)?.toInstant(ZoneOffset.UTC)
     }
 
     @Override

@@ -82,6 +82,13 @@ public interface AuditoriaOutboxPort {
     boolean liberar(AuditoriaOutboxEvento evento);
 
     /**
+     * Cuántos eventos esperan publicarse, cuántos fallaron y desde cuándo espera el más antiguo (métricas).
+     *
+     * @return el resumen
+     */
+    ResumenOutbox resumen();
+
+    /**
      * Borra eventos {@link EstadoOutbox#ENVIADO} confirmados antes de {@code limite}.
      *
      * @param limite fecha de envío límite

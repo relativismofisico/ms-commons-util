@@ -18,6 +18,8 @@ import org.springframework.transaction.support.TransactionTemplate
 import org.testcontainers.containers.MongoDBContainer
 import spock.lang.Shared
 
+import java.time.Instant
+
 /** Outbox Mongo contra un replica set real de un nodo (las transacciones de Mongo lo exigen). */
 class MongoAuditoriaOutboxIntegracionSpec extends OutboxIntegracionBase {
 
@@ -90,6 +92,13 @@ class MongoAuditoriaOutboxIntegracionSpec extends OutboxIntegracionBase {
                 d.getString("topic"), d.getString("payload"), EstadoOutbox.valueOf(d.getString("estado")),
                 d.getInteger("intentos"), d.getDate("proximoIntento")?.toInstant(), d.getDate("leaseHasta")?.toInstant(),
                 d.getDate("fechaCreacion")?.toInstant(), d.getDate("fechaEnvio")?.toInstant(), d.getString("ultimoError"))
+    }
+
+    @Override
+    void forzar(String eventId, EstadoOutbox estado, int intentos, Instant proximoIntento, Instant leaseHasta) {
+        mongo.updateFirst(new Query(Criteria.where("eventId").is(eventId)), new Update().set("estado", estado.name())
+                .set("intentos", intentos).set("proximoIntento", Date.from(proximoIntento))
+                .set("leaseHasta", leaseHasta == null ? null : Date.from(leaseHasta)), COLECCION)
     }
 
     @Override

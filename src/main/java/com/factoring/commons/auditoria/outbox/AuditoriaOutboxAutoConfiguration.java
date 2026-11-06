@@ -9,6 +9,7 @@ import com.factoring.commons.auditoria.AuditoriaPort;
 import com.factoring.commons.auditoria.AuditoriaPublisher;
 import com.factoring.commons.auditoria.outbox.jdbc.JdbcAuditoriaOutboxAdapter;
 import com.factoring.commons.auditoria.outbox.mongo.MongoAuditoriaOutboxAdapter;
+import io.micrometer.core.instrument.binder.MeterBinder;
 import net.javacrumbs.shedlock.core.LockProvider;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
@@ -26,8 +27,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 /**
  * Outbox de auditoría ({@code auditoria.outbox.enabled=true}; por defecto apagado, y sin él no se registra ningún bean
  * de esta clase). Registra el almacén indicado en {@code auditoria.outbox.almacen} ({@code jdbc} o {@code mongo}, cada
- * uno solo si el servicio trae su librería), un {@link AuditoriaPort} que escribe en él, el relay, la limpieza y su
- * planificador.
+ * uno solo si el servicio trae su librería), un {@link AuditoriaPort} que escribe en él, el relay, la limpieza, su
+ * planificador y, si el servicio tiene Micrometer, las gauges del outbox.
  *
  * <p>No expone {@code JdbcTemplate}, {@code TransactionManager} ni {@code MongoTemplate} propios: usa los del servicio y
  * no compite por tipo con ellos.</p>
@@ -96,17 +97,33 @@ public class AuditoriaOutboxAutoConfiguration {
     }
 
     /**
-     * Planificador del relay y de la limpieza.
+     * Estadísticas del outbox para las métricas (solo consultan el almacén si alguien las publica).
      *
-     * @param relay       relay del outbox
-     * @param limpieza    limpieza del outbox
      * @param propiedades {@code auditoria.outbox.*}
+     * @param outbox      almacén del outbox
+     * @return las estadísticas
+     */
+    @Bean
+    public AuditoriaOutboxEstadisticas auditoriaOutboxEstadisticas(final AuditoriaOutboxProperties propiedades,
+            final ObjectProvider<AuditoriaOutboxPort> outbox) {
+        propiedades.validar();
+        return new AuditoriaOutboxEstadisticas(outbox.getObject(), reloj);
+    }
+
+    /**
+     * Planificador del relay, de la limpieza y del refresco de las métricas.
+     *
+     * @param relay        relay del outbox
+     * @param limpieza     limpieza del outbox
+     * @param propiedades  {@code auditoria.outbox.*}
+     * @param estadisticas estadísticas para las métricas
      * @return el planificador
      */
     @Bean
     public AuditoriaOutboxPlanificador auditoriaOutboxPlanificador(final OutboxAuditoriaRelay relay,
-            final AuditoriaOutboxLimpieza limpieza, final AuditoriaOutboxProperties propiedades) {
-        return new AuditoriaOutboxPlanificador(relay, limpieza, propiedades);
+            final AuditoriaOutboxLimpieza limpieza, final AuditoriaOutboxProperties propiedades,
+            final AuditoriaOutboxEstadisticas estadisticas) {
+        return new AuditoriaOutboxPlanificador(relay, limpieza, propiedades, estadisticas);
     }
 
     /** Almacén JDBC: tabla {@code auditoria_outbox} en el DataSource del servicio. */
@@ -142,6 +159,21 @@ public class AuditoriaOutboxAutoConfiguration {
                 return configurada;
             }
             return "auditoria_outbox_" + servicioOrigen.replaceAll("[^A-Za-z0-9_]", "_");
+        }
+    }
+
+    /**
+     * Gauges de Micrometer, si el servicio lo tiene. Es un {@code MeterBinder}: los registra el {@code MeterRegistry}
+     * de Spring Boot Actuator al arrancar.
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(MeterBinder.class)
+    static class ConMicrometer {
+
+        @Bean
+        AuditoriaOutboxMetricas auditoriaOutboxMetricas(final AuditoriaOutboxEstadisticas estadisticas,
+                @Value(SERVICIO) final String servicioOrigen) {
+            return new AuditoriaOutboxMetricas(estadisticas, servicioOrigen);
         }
     }
 

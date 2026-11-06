@@ -69,6 +69,7 @@ class PiezasOutboxSpec extends Specification {
         p.backoffMax == Duration.ofMinutes(10)
         p.retencion == Duration.ofDays(30)
         p.intervaloLimpieza == Duration.ofHours(1)
+        p.intervaloMetricas == Duration.ofSeconds(30)
         p.lease == Duration.ofMinutes(5)
         p.timeoutAck == Duration.ofSeconds(30)
         p.mongo.coleccion == null
@@ -101,6 +102,7 @@ class PiezasOutboxSpec extends Specification {
         "max-intentos"       | { it.maxIntentos = 0 }
         "intervalo "         | { it.intervalo = Duration.ZERO }
         "intervalo-limpieza" | { it.intervaloLimpieza = Duration.ofSeconds(-1) }
+        "intervalo-metricas" | { it.intervaloMetricas = Duration.ZERO }
         "backoff-base"       | { it.backoffBase = null }
         "retencion"          | { it.retencion = Duration.ZERO }
         "timeout-ack"        | { it.timeoutAck = Duration.ZERO }
@@ -260,6 +262,68 @@ class PiezasOutboxSpec extends Specification {
         then:
         Thread.interrupted()
         !planificador.running
+    }
+
+    // ── AuditoriaOutboxEstadisticas y planificador con métricas ───────────────
+
+    def "estadísticas: no consultan el almacén hasta que alguien las activa; después guardan el último resumen"() {
+        given:
+        AuditoriaOutboxPort outbox = Mock()
+        def reloj = new RelojDePrueba()
+        def estadisticas = new AuditoriaOutboxEstadisticas(outbox, reloj)
+
+        when:
+        estadisticas.actualizarSeguro()
+
+        then:
+        0 * outbox._
+        !estadisticas.activa
+        estadisticas.edadMasAntiguoSegundos() == 0
+
+        when:
+        estadisticas.activar()
+        estadisticas.actualizarSeguro()
+        reloj.avanzar(Duration.ofSeconds(90))
+
+        then:
+        1 * outbox.resumen() >> new ResumenOutbox(7, 2, reloj.instant().minusSeconds(30))
+        estadisticas.pendientes() == 7
+        estadisticas.fallidos() == 2
+        estadisticas.edadMasAntiguoSegundos() == 120d
+
+        when: "un fallo conserva los valores anteriores"
+        estadisticas.actualizarSeguro()
+
+        then:
+        1 * outbox.resumen() >> { throw new IllegalStateException("bd") }
+        estadisticas.pendientes() == 7
+
+        when: "sin pendientes, la edad vuelve a 0"
+        estadisticas.actualizarSeguro()
+
+        then:
+        1 * outbox.resumen() >> ResumenOutbox.VACIO
+        estadisticas.pendientes() == 0
+        estadisticas.edadMasAntiguoSegundos() == 0
+    }
+
+    def "planificador con estadísticas: las refresca en su hilo"() {
+        given:
+        def refrescos = new CountDownLatch(2)
+        AuditoriaOutboxEstadisticas estadisticas = Mock() { actualizarSeguro() >> { refrescos.countDown() } }
+        def propiedades = new AuditoriaOutboxProperties(intervalo: Duration.ofHours(1),
+                intervaloMetricas: Duration.ofMillis(20))
+        def planificador = new AuditoriaOutboxPlanificador(Mock(OutboxAuditoriaRelay), Mock(AuditoriaOutboxLimpieza),
+                propiedades, estadisticas)
+
+        when:
+        planificador.start()
+
+        then:
+        refrescos.await(5, TimeUnit.SECONDS)
+
+        cleanup:
+        planificador.stop()
     }
 
     // ── AuditoriaOutboxEvento ─────────────────────────────────────────────────
