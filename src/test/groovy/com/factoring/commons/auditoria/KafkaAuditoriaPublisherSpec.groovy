@@ -8,7 +8,10 @@ import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.kafka.support.SendResult
 import spock.lang.Specification
 
+import java.time.Duration
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 class KafkaAuditoriaPublisherSpec extends Specification {
 
@@ -117,6 +120,51 @@ class KafkaAuditoriaPublisherSpec extends Specification {
         1 * template.send(_, _, _) >> futuro
         thrown(AuditoriaNoPublicadaException)
         Thread.interrupted()
+    }
+
+    def "publicarConfirmado con topic y espera: publica en ese topic y espera solo lo indicado"() {
+        given:
+        def futuro = Mock(CompletableFuture)
+
+        when:
+        publisher.publicarConfirmado(evento(), "auditoria.otro", Duration.ofMillis(1500))
+
+        then:
+        1 * template.send("auditoria.otro", "FACTURA:CUFE-1", _ as String) >> futuro
+        1 * futuro.get(1500L, TimeUnit.MILLISECONDS)
+    }
+
+    def "publicarConfirmado sin topic usa el configurado; un timeout del ack se propaga"() {
+        given:
+        def futuro = Mock(CompletableFuture) {
+            get(_, _) >> { throw new TimeoutException() }
+        }
+
+        when:
+        publisher.publicarConfirmado(evento(), topic, Duration.ofSeconds(1))
+
+        then:
+        1 * template.send("auditoria.accion", _, _) >> futuro
+        thrown(AuditoriaNoPublicadaException)
+
+        where:
+        topic << [null, " "]
+    }
+
+    def "la implementación por defecto de la interfaz delega en publicarConfirmado(evento)"() {
+        given:
+        def llamadas = []
+        AuditoriaPublisher propio = new AuditoriaPublisher() {
+            void publicar(AuditoriaAccionEvent e) {}
+            void publicarConfirmado(AuditoriaAccionEvent e) { llamadas << e.eventId() }
+        }
+        def e = evento()
+
+        when:
+        propio.publicarConfirmado(e, "auditoria.otro", Duration.ofSeconds(1))
+
+        then:
+        llamadas == [e.eventId()]
     }
 
     def "evento no publicado: el log general solo lleva identificadores; el evento completo va al logger dedicado"() {
