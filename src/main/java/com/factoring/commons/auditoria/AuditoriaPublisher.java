@@ -1,5 +1,7 @@
 package com.factoring.commons.auditoria;
 
+import java.time.Duration;
+
 /**
  * Publica eventos de auditoría. La implementación por defecto ({@link KafkaAuditoriaPublisher}) la registra la
  * autoconfiguración en todo servicio que tenga Kafka.
@@ -26,4 +28,19 @@ public interface AuditoriaPublisher {
      * @throws AuditoriaNoPublicadaException si Kafka no lo confirmó
      */
     void publicarConfirmado(AuditoriaAccionEvent evento);
+
+    /**
+     * Como {@link #publicarConfirmado(AuditoriaAccionEvent)}, pero en el topic indicado y con una espera acotada. Lo
+     * usa el relay del outbox de auditoría ({@code auditoria.outbox.*}), que guarda el topic con cada evento. La
+     * implementación por defecto ignora el topic y la espera: existe para no romper a quien implemente esta interfaz
+     * por su cuenta.
+     *
+     * @param evento evento construido con {@link AuditoriaAccionEvent#builder()}
+     * @param topic  topic donde publicarlo
+     * @param espera espera máxima de la confirmación del broker
+     * @throws AuditoriaNoPublicadaException si Kafka no lo confirmó dentro de la espera
+     */
+    default void publicarConfirmado(AuditoriaAccionEvent evento, String topic, Duration espera) {
+        publicarConfirmado(evento);
+    }
 }

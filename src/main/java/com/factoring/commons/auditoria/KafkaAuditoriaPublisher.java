@@ -1,5 +1,6 @@
 package com.factoring.commons.auditoria;
 
+import java.time.Duration;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -31,7 +32,7 @@ public class KafkaAuditoriaPublisher implements AuditoriaPublisher, DisposableBe
     private static final Logger LOG_NO_PUBLICADO = LoggerFactory.getLogger(LOGGER_NO_PUBLICADO);
 
     /** Espera máxima de la confirmación en {@link #publicarConfirmado}: por encima de delivery.timeout.ms (120 s). */
-    private static final long ESPERA_CONFIRMACION_S = 130;
+    private static final Duration ESPERA_CONFIRMACION = Duration.ofSeconds(130);
 
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final String topic;
@@ -67,10 +68,19 @@ public class KafkaAuditoriaPublisher implements AuditoriaPublisher, DisposableBe
 
     @Override
     public void publicarConfirmado(final AuditoriaAccionEvent evento) {
+        publicarConfirmado(evento, topic, ESPERA_CONFIRMACION);
+    }
+
+    @Override
+    public void publicarConfirmado(final AuditoriaAccionEvent evento, final String destino, final Duration espera) {
         final AuditoriaAccionEvent completo = completar(evento);
+        String topicDestino = destino;
+        if (topicDestino == null || topicDestino.isBlank()) {
+            topicDestino = topic;
+        }
         try {
-            kafkaTemplate.send(topic, completo.claveKafka(), AuditoriaJson.serializar(completo))
-                    .get(ESPERA_CONFIRMACION_S, TimeUnit.SECONDS);
+            kafkaTemplate.send(topicDestino, completo.claveKafka(), AuditoriaJson.serializar(completo))
+                    .get(espera.toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new AuditoriaNoPublicadaException(completo.eventId(), e);
