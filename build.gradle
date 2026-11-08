@@ -13,7 +13,7 @@ plugins {
 }
 
 group = 'com.factoring'
-version = '0.5.1'
+version = '0.6.0'
 
 java {
     toolchain {
@@ -134,7 +134,31 @@ test {
     useJUnitPlatform()
     // Zona fija: el resultado no depende de la máquina. testIntegracionBogota repite la integración en otra zona.
     systemProperty 'user.timezone', 'UTC'
+    // La medición de tomarLote no es un test: se corre a mano con medirTomarLote
+    exclude '**/MedicionTomarLote*'
     finalizedBy jacocoTestReport
+}
+
+// Medición de tomarLote (issue #14) contra un MySQL y un Mongo locales: -Dmedicion.jdbc.url, -Dmedicion.jdbc.usuario,
+// -Dmedicion.jdbc.clave y -Dmedicion.mongo.uri. No forma parte de check ni del CI.
+tasks.register('medirTomarLote', Test) {
+    description = 'Mide tomarLote con 100 000 eventos y 60 claves bloqueadas (no corre en check).'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform()
+    systemProperty 'user.timezone', 'UTC'
+    filter {
+        includeTestsMatching '*MedicionTomarLote'
+    }
+    systemProperties System.properties.findAll { it.key.toString().startsWith('medicion.') }
+    testLogging {
+        showStandardStreams = true
+    }
+    outputs.upToDateWhen { false }
+    jacoco {
+        enabled = false
+    }
 }
 
 // Integración del outbox otra vez con la JVM fuera de UTC: las fechas del outbox se guardan y comparan en UTC siempre.

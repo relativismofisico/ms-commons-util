@@ -5,11 +5,14 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import com.factoring.commons.auditoria.AuditoriaAccionEvent;
 import com.factoring.commons.auditoria.AuditoriaJson;
 import com.factoring.commons.auditoria.AuditoriaPublisher;
+import com.factoring.commons.outbox.OutboxJson;
+import com.factoring.commons.outbox.PublicadorOutbox;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -51,6 +54,7 @@ public class OutboxAuditoriaRelay {
 
     private final AuditoriaOutboxPort outbox;
     private final AuditoriaPublisher publicador;
+    private final PublicadorOutbox publicadorGenerico;
     private final AuditoriaOutboxProperties propiedades;
     private final Clock reloj;
     private final Pausa pausa;
@@ -75,8 +79,23 @@ public class OutboxAuditoriaRelay {
      */
     public OutboxAuditoriaRelay(final AuditoriaOutboxPort outbox, final AuditoriaPublisher publicador,
             final AuditoriaOutboxProperties propiedades, final Clock reloj, final Pausa pausa) {
+        this(outbox, publicador, null, propiedades, reloj, pausa);
+    }
+
+    /**
+     * @param outbox             almacén del outbox
+     * @param publicador         publicador de auditoría (espera el ack)
+     * @param publicadorGenerico publicador de los eventos genéricos ({@code null}: el servicio no los usa)
+     * @param propiedades        {@code auditoria.outbox.*}
+     * @param reloj              reloj de los leases y reintentos
+     * @param pausa              pausa entre los intentos de marcar ENVIADO
+     */
+    public OutboxAuditoriaRelay(final AuditoriaOutboxPort outbox, final AuditoriaPublisher publicador,
+            final PublicadorOutbox publicadorGenerico, final AuditoriaOutboxProperties propiedades, final Clock reloj,
+            final Pausa pausa) {
         this.outbox = outbox;
         this.publicador = publicador;
+        this.publicadorGenerico = publicadorGenerico;
         this.propiedades = propiedades;
         this.reloj = reloj;
         this.pausa = pausa;
@@ -130,6 +149,9 @@ public class OutboxAuditoriaRelay {
 
     /** Publica y marca; devuelve falso si falló (la clave queda detenida en este lote). */
     private boolean publicar(final AuditoriaOutboxEvento evento) {
+        if (evento.tipo() != null) {
+            return publicarGenerico(evento);
+        }
         final AuditoriaAccionEvent accion;
         try {
             accion = AuditoriaJson.deserializar(evento.payload());
@@ -140,6 +162,30 @@ public class OutboxAuditoriaRelay {
         }
         try {
             publicador.publicarConfirmado(accion, evento.topic(), propiedades.getTimeoutAck());
+        } catch (RuntimeException e) {
+            registrarFallo(evento, ErrorSaneado.de(e));
+            return false;
+        }
+        marcarEnviado(evento);
+        return true;
+    }
+
+    /** Evento genérico: el sobre tal cual, con las cabeceras leídas del propio sobre. */
+    private boolean publicarGenerico(final AuditoriaOutboxEvento evento) {
+        final Map<String, String> cabeceras;
+        try {
+            cabeceras = OutboxJson.cabeceras(evento.payload());
+        } catch (IllegalArgumentException e) {
+            fallido(evento, evento.intentos() + 1, ErrorSaneado.PAYLOAD_ILEGIBLE);
+            return false;
+        }
+        if (publicadorGenerico == null) {
+            registrarFallo(evento, ErrorSaneado.SIN_PUBLICADOR);
+            return false;
+        }
+        try {
+            publicadorGenerico.publicarConfirmado(evento.topic(), evento.claveKafka(), evento.payload(), cabeceras,
+                    propiedades.getTimeoutAck());
         } catch (RuntimeException e) {
             registrarFallo(evento, ErrorSaneado.de(e));
             return false;

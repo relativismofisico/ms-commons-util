@@ -2,10 +2,12 @@ package com.factoring.commons.auditoria.outbox;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 /**
- * Almacén del outbox de auditoría. Hay una implementación JDBC (tabla {@code auditoria_outbox}) y una Mongo (colección
- * propia del servicio); la autoconfiguración registra la que indique {@code auditoria.outbox.almacen}.
+ * Almacén del outbox. Hay una implementación JDBC (tabla configurable, {@code auditoria_outbox} por defecto) y una
+ * Mongo (colección propia del servicio); la autoconfiguración registra la que indique {@code auditoria.outbox.almacen}.
+ * Guarda tanto los eventos de auditoría como los eventos genéricos de {@code com.factoring.commons.outbox}.
  *
  * <p>Las operaciones de marcado son condicionales: solo cambian el evento si sigue reclamado con el mismo lease
  * ({@code leaseHasta}) que devolvió {@link #tomarLote}. Un relay cuyo lease venció no pisa lo que hizo otro.</p>
@@ -96,4 +98,24 @@ public interface AuditoriaOutboxPort {
      * @return eventos borrados
      */
     int limpiarEnviadosAnteriores(Instant limite, int maximo);
+
+    /**
+     * El resumen separado por tipo de evento ({@link AuditoriaOutboxEvento#tipoMetricas()}). Por defecto, todo cuenta
+     * como auditoría.
+     *
+     * @return resumen por tipo; un tipo sin eventos por enviar puede faltar
+     */
+    default Map<String, ResumenTipo> resumenPorTipo() {
+        return Map.of(AuditoriaOutboxEvento.TIPO_AUDITORIA, ResumenTipo.de(resumen()));
+    }
+
+    /**
+     * Comprueba al arrancar que el almacén puede guardar eventos genéricos (con {@code tipo}). Por defecto no exige
+     * nada.
+     *
+     * @throws IllegalStateException si el esquema del almacén no admite eventos genéricos
+     */
+    default void verificarEventosGenericos() {
+        // Sin requisitos por defecto.
+    }
 }

@@ -15,6 +15,9 @@ public final class ErrorSaneado {
     /** Código fijo de un payload que ya no se puede leer como evento de auditoría. */
     public static final String PAYLOAD_ILEGIBLE = "PAYLOAD_ILEGIBLE";
 
+    /** Código fijo de un evento genérico sin publicador configurado (el servicio no tiene Kafka). */
+    public static final String SIN_PUBLICADOR = "SIN_PUBLICADOR";
+
     /** Largo máximo (la columna {@code ultimo_error} es VARCHAR(500)). */
     static final int LARGO_MAXIMO = 500;
 

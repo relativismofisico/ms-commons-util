@@ -130,8 +130,8 @@ class MongoAuditoriaOutboxIntegracionSpec extends OutboxIntegracionBase {
         [a1, a2, b1].each { puerto().registrar(it) }
         MongoTemplate mongoQueRoba = Spy(mongo)
         boolean robado = false
-        // entre la lectura de candidatos y el findAndModify, otro relay se lleva a1
-        mongoQueRoba.findAndModify(_, _, _, _, _) >> {
+        // entre la lectura de candidatos y el reclamo (updateMany desde 0.6.0), otro relay se lleva a1
+        mongoQueRoba.updateMulti(_ as Query, _, _ as String) >> {
             if (!robado) {
                 robado = true
                 mongo.updateFirst(new Query(Criteria.where("eventId").is(a1.eventId())),

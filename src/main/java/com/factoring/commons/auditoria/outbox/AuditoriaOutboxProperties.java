@@ -2,6 +2,7 @@ package com.factoring.commons.auditoria.outbox;
 
 import java.time.Duration;
 
+import com.factoring.commons.auditoria.outbox.jdbc.JdbcAuditoriaOutboxAdapter;
 import lombok.Getter;
 import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -70,6 +71,16 @@ public class AuditoriaOutboxProperties {
     /** Espera máxima de la confirmación de Kafka por evento. */
     private Duration timeoutAck = Duration.ofSeconds(ESPERA_ACK_S_POR_DEFECTO);
 
+    /**
+     * Modo "solo drenar": el relay sigue publicando lo pendiente, pero el outbox no acepta eventos nuevos. Los eventos
+     * de auditoría vuelven a publicarse directo (el camino sin outbox) y {@code OutboxPort.registrar} lanza
+     * {@code OutboxSoloDrenarException}. Sirve para volver atrás sin perder lo ya registrado.
+     */
+    private boolean soloDrenar;
+
+    /** Opciones del almacén JDBC. */
+    private Jdbc jdbc = new Jdbc();
+
     /** Opciones del almacén Mongo. */
     private Mongo mongo = new Mongo();
 
@@ -103,6 +114,18 @@ public class AuditoriaOutboxProperties {
         if (!condicion) {
             throw new IllegalStateException(PREFIJO + "." + mensaje);
         }
+    }
+
+    /** Opciones del almacén JDBC. */
+    @Getter
+    @Setter
+    public static class Jdbc {
+
+        /**
+         * Tabla del outbox, propia del servicio (p. ej. {@code outbox_<servicio>}). Por defecto {@code auditoria_outbox},
+         * el nombre de 0.5.x.
+         */
+        private String tabla = JdbcAuditoriaOutboxAdapter.TABLA;
     }
 
     /** Opciones del almacén Mongo. */
