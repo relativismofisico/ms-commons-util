@@ -11,11 +11,282 @@ coincide con `version` de `build.gradle`).
 | `com.factoring.commons.mdc` | Trazabilidad: `requestId` y actor en el MDC, propagación a Feign / RestTemplate / WebClient |
 | `com.factoring.commons.auditoria` | Contrato `AuditoriaAccionEvent` y publicador Kafka autoconfigurado (`auditoria.*`) |
 | `com.factoring.commons.auditoria.outbox` | Outbox transaccional de auditoría, opcional (`auditoria.outbox.*`, desde 0.5.0) |
+| `com.factoring.commons.outbox` | Outbox genérico: sobre `EventoOutbox`, `TiposDeEvento`, `OutboxPort` y publicador con cabeceras (desde 0.6.0) |
+| `com.factoring.commons.outbox.idempotencia` | `ConsumoIdempotente`: efecto a lo sumo una vez por consumidor y evento (`consumo-idempotente.*`, desde 0.6.0) |
 
 Todas las dependencias de Spring, Kafka, JDBC, Mongo y ShedLock son `compileOnly`: cada pieza se registra solo si el
 servicio trae la librería correspondiente.
 
 La definición de terminado de la plataforma está en [DEFINITION_OF_DONE.md](DEFINITION_OF_DONE.md).
+
+---
+
+## Outbox genérico, métricas por tipo y consumo idempotente (0.6.0)
+
+### Qué cambia y qué no
+
+0.6.0 generaliza el outbox de 0.5.x: además de los eventos de auditoría, guarda y publica **cualquier tipo de evento
+que el servicio declare**, con un sobre común y cabeceras Kafka. Suma un helper de **consumo idempotente** para los
+consumidores.
+
+**Compatible con 0.5.1.** Un servicio que sube sin tocar su configuración sigue igual:
+- mismas propiedades `auditoria.outbox.*`, la tabla `auditoria_outbox` y la colección `auditoria_outbox_<servicio>`;
+- el mismo formato de los eventos de auditoría;
+- los mismos constructores públicos.
+
+Cambios visibles:
+- `AuditoriaOutboxEvento` gana el componente `tipo`, al final y nulo en los eventos de auditoría. Conserva el
+  constructor de 12 argumentos.
+- `AuditoriaOutboxPort` gana dos métodos `default`: `resumenPorTipo()` y `verificarEventosGenericos()`.
+- `JdbcAuditoriaOutboxAdapter` pasa a ser `final`.
+- Los gauges se refrescan en su propio hilo.
+- Hay gauges nuevos `outbox.*`; los de 0.5.x quedan como alias.
+- Mongo crea dos índices nuevos al arrancar: `ix_outbox_orden` y el TTL `ttl_outbox_enviados`.
+
+### Sobre del evento
+
+`EventoOutbox<T>` (JSON de `OutboxJson`) es el valor del mensaje Kafka:
+
+| Campo | Qué es |
+|---|---|
+| `eventId` | UUID que genera el productor al registrar el evento, dentro de su transacción. Es la clave de idempotencia de punta a punta: el relay y los reintentos no lo cambian |
+| `tipo`, `version` | Nombre lógico estable del evento y versión del esquema del payload |
+| `servicioOrigen` | `spring.application.name` del productor |
+| `ocurridoEn` | Instante UTC del registro |
+| `requestId` | MDC `requestId`, para correlacionar con los logs |
+| `clave` | Clave Kafka y de orden, calculada por el tipo a partir del payload |
+| `payload` | Los datos del evento |
+
+Cabeceras Kafka: `eventId`, `tipo`, `version` y `servicioOrigen`. Así un consumidor puede deduplicar y enrutar sin
+leer el payload. No van headers de tipo de Spring (`__TypeId__`).
+
+### Declarar los tipos y registrar
+
+Cada servicio expone un bean `TiposDeEvento`, en código, para que el compilador vigile la clase y la función de la
+clave:
+
+```java
+@Bean
+TiposDeEvento tiposDeEvento() {
+    return TiposDeEvento.de(
+            TipoDeEvento.de("documento.creado", DocumentoCreado.class)
+                    .version(1)
+                    .topic("${topics.documento-creado}")   // placeholder de una propiedad, o el nombre directo
+                    .clave(DocumentoCreado::documentoId)    // nunca un valor aleatorio
+                    .build());
+}
+```
+
+```java
+@Transactional
+public void crear(...) {
+    repositorio.guardar(documento);
+    outbox.registrar("documento.creado", new DocumentoCreado(documento.id(), ...));   // OutboxPort
+}
+```
+
+- **Al arrancar** (fail-fast) falla si:
+  - hay un nombre repetido o vacío, una versión menor que 1, o falta el topic o la función de clave;
+  - un topic queda sin resolver;
+  - el almacén no admite eventos genéricos (una tabla JDBC sin la columna `tipo`).
+- **En ejecución** `registrar` rechaza:
+  - un tipo no declarado (`TipoDeEventoNoDeclaradoException`);
+  - un payload de otra clase;
+  - una clave vacía.
+- **Orden:** se garantiza por `clave` dentro de un servicio, con el mismo bloqueo por clave del relay de 0.5.1. Entre
+  servicios no hay orden.
+
+### Almacén por servicio
+
+La tabla o la colección es **propia de cada servicio**, nunca compartida. Si dos servicios comparten una tabla, cada
+relay drena eventos del otro y los gauges suman los dos.
+
+| Propiedad | Default | Qué es |
+|---|---|---|
+| `auditoria.outbox.jdbc.tabla` | `auditoria_outbox` | Tabla del almacén JDBC (p. ej. `outbox_<servicio>`); solo letras, dígitos y `_` |
+| `auditoria.outbox.mongo.coleccion` | `auditoria_outbox_<servicio>` | Colección del almacén Mongo (ya existía) |
+| `auditoria.outbox.solo-drenar` | `false` | Ver "Volver atrás: solo drenar" |
+
+Esquema JDBC 0.6.0: el de 0.5.x más la columna `tipo`. Una tabla nueva:
+
+```sql
+CREATE TABLE outbox_mi_servicio (
+    id              BIGINT       NOT NULL AUTO_INCREMENT,
+    event_id        VARCHAR(64)  NOT NULL,
+    tipo            VARCHAR(100) NULL,
+    clave_kafka     VARCHAR(255) NOT NULL,
+    topic           VARCHAR(255) NOT NULL,
+    payload         MEDIUMTEXT   NOT NULL,
+    estado          VARCHAR(16)  NOT NULL,
+    intentos        INT          NOT NULL DEFAULT 0,
+    proximo_intento DATETIME(3)  NOT NULL,
+    lease_hasta     DATETIME(3)  NULL,
+    fecha_creacion  DATETIME(3)  NOT NULL,
+    fecha_envio     DATETIME(3)  NULL,
+    ultimo_error    VARCHAR(500) NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY ux_outbox_event_id (event_id),
+    KEY ix_outbox_lote (estado, proximo_intento, id),
+    KEY ix_outbox_clave (clave_kafka, estado, id),
+    KEY ix_outbox_limpieza (estado, fecha_envio)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+```
+
+Una tabla de 0.5.x que vaya a guardar también eventos genéricos necesita
+`ALTER TABLE <tabla> ADD COLUMN tipo VARCHAR(100) NULL`. Solo con auditoría no hace falta: el adaptador detecta si la
+columna existe.
+
+### Relay
+
+Es el mismo relay de 0.5.1, con los mismos estados, lease, ack con tiempo límite, backoff, FALLIDO que bloquea su
+clave y limpieza. Solo cambia según el tipo de evento:
+- **Con `tipo`:** sale por `PublicadorOutbox`, el sobre tal cual con sus cabeceras. `KafkaPublicadorOutbox` usa un
+  productor propio con las propiedades `spring.kafka.*` del servicio, `acks=all` e idempotencia.
+- **De auditoría:** sigue saliendo por `AuditoriaPublisher`, sin cambios.
+
+### Volver atrás: solo drenar
+
+`auditoria.outbox.solo-drenar=true` deja el relay publicando lo pendiente, pero el outbox **no acepta eventos nuevos**:
+- `OutboxPort.registrar` lanza `OutboxSoloDrenarException`; quien registra elige su camino alternativo;
+- los eventos de auditoría se publican directo, como sin outbox.
+
+Lo ya registrado no se pierde. Para pasar los pendientes de una tabla o colección a otra, hay que detener antes el
+relay de ambas (o copiar y borrar en una sola operación): así ningún evento sale dos veces ni queda sin salir.
+
+### Consumidores: orden por clave y duplicados
+
+El outbox entrega **al menos una vez**: un evento puede llegar repetido, siempre con el mismo `eventId`. El orden por
+clave se conserva de punta a punta solo si el consumidor procesa **de forma bloqueante**: con el `DefaultErrorHandler`
+de Spring Kafka, mientras un mensaje se reintenta los siguientes de su partición esperan.
+
+Con reintentos no bloqueantes (`@RetryableTopic` y topics de reintento), o al mandar un mensaje a la DLT, el siguiente
+evento de la misma clave se procesa antes que el fallido, y **se pierde el orden**. La DLT queda para errores que no se
+pueden reintentar, y conviene que su procesamiento aplique las mismas guardas de estado.
+
+### Métricas (#15)
+
+El refresco de las métricas corre en **su propio hilo** (`outbox-metricas`), separado del relay. Un relay esperando un
+ack, hasta `timeout-ack` por evento, ya no congela los gauges.
+
+| Gauge | Tags | Qué mide |
+|---|---|---|
+| `outbox.pendientes` | `tipo`, `servicio` | PENDIENTE y EN_PROCESO |
+| `outbox.en_proceso` | `tipo`, `servicio` | EN_PROCESO: reclamados por un relay, con lease |
+| `outbox.fallidos` | `tipo`, `servicio` | FALLIDO; cada uno bloquea los posteriores de su clave: alertar si es mayor que 0 |
+| `outbox.edad_mas_antiguo_segundos` | `tipo`, `servicio` | Segundos que lleva esperando el pendiente más antiguo |
+| `auditoria.outbox.pendientes`, `auditoria.outbox.fallidos`, `auditoria.outbox.edad_mas_antiguo_segundos` | `servicio` | Alias de 0.5.x con el total de todos los tipos; se mantienen durante 0.6.x |
+
+Los eventos de auditoría se cuentan con `tipo=auditoria.accion`.
+
+### Mongo: `tomarLote` con claves bloqueadas (#14)
+
+En 0.5.1, `tomarLote` ordenaba los candidatos en memoria y evaluaba un `$lookup` por documento antes del límite. En
+0.6.0:
+- recorre los candidatos **por páginas** sobre el índice nuevo `{estado, fechaCreacion, _id}`, con el orden servido
+  por el índice y una proyección sin `payload`;
+- para cada página calcula, con un solo `$group`, el primer bloqueante de cada una de sus claves: FALLIDO, EN_PROCESO
+  o PENDIENTE en backoff;
+- descarta en memoria los candidatos posteriores a su bloqueante y para al llenar el lote;
+- reclama los elegibles con **un solo `updateMany`** condicionado a `PENDIENTE` y marcado con un token de la llamada, en
+  vez de un `findAndModify` por evento, que esperaba una escritura cada vez. Si otro relay se llevó antes alguno, los
+  siguientes de esa clave se liberan, igual que antes.
+
+Una clave bloqueada no ocupa el lote y las demás siempre salen.
+
+**Limpieza:** con `auditoria.outbox.retencion` (30 días por defecto), Mongo crea además un **índice TTL parcial**
+(`ttl_outbox_enviados`) sobre `fechaEnvio` de los ENVIADO. Si la retención cambia, se ajusta con `collMod` al arrancar.
+La limpieza periódica sigue activa.
+
+**Medición:** mismo escenario de la issue #14, con los adaptadores reales contra MySQL 8 y Mongo 7 (replica set de un
+nodo) locales y `./gradlew medirTomarLote`:
+- 100 000 eventos en 2 000 claves de 50;
+- 40 claves con un FALLIDO en cabeza y 20 con la cabeza en backoff, todas primero en el orden de creación;
+- 20 ciclos de `tomarLote(50)`.
+
+| Almacén | 0.5.1: p95 / mediana / máximo | 0.6.0: p95 / mediana / máximo |
+|---|---|---|
+| Mongo 7.0.34 | 804 / 644 / 1021 ms | **64** / 48 / 162 ms |
+| JDBC (MySQL 8.0.46) | 88 / 46 / 95 ms | 46 / 35 / 128 ms |
+
+En los 20 ciclos de cada corrida se tomaron 50 eventos y ninguno de claves bloqueadas. El máximo es el primer ciclo, en
+frío.
+
+### Consumo idempotente
+
+`ConsumoIdempotente.procesar(consumidor, eventId, efecto)` aplica el efecto **a lo sumo una vez por consumidor**: inserta
+la marca `(consumidor, eventId)` en la **misma transacción** que el efecto.
+- Si la marca ya existe, el efecto no corre y devuelve `false`.
+- Si el efecto falla, se revierten la marca y el efecto, y el reintento lo vuelve a aplicar.
+- Sin `eventId` (productores que todavía no lo envían) se usa la variante `procesar(consumidor, eventId, claveNatural,
+  efecto)`, que guarda la clave natural con el prefijo `nat:`.
+
+**Solo sirve si el efecto está en el mismo almacén que la marca**, con la misma base y el mismo gestor de
+transacciones. Para un efecto externo (un correo, una llamada HTTP) no hay transacción común. Ahí hay dos caminos:
+- marcar **después** del efecto y aceptar un duplicado raro;
+- si un duplicado es inaceptable, reclamar el efecto antes con estados propios (en curso, hecho, incierto) y no
+  reintentarlo solo cuando quedó a medias.
+
+| Almacén | Marca | Retención | Concurrencia |
+|---|---|---|---|
+| `jdbc` | Tabla `evento_procesado` con PK `(consumidor, clave)`. Usa el gestor de transacciones del servicio (REQUIRED) | Limpieza periódica en un hilo propio (`intervalo-limpieza`) | El segundo INSERT espera el bloqueo de la PK; si la primera transacción confirma, el evento es un duplicado |
+| `mongo` | Colección `evento_procesado` con `_id = {consumidor, clave}`. Usa un `MongoTransactionManager` (replica set) | Índice TTL sobre `fechaProcesado` | Una transacción gana; la otra recibe un conflicto transitorio que el consumidor reintenta, y el reintento ya ve la marca |
+
+```sql
+CREATE TABLE IF NOT EXISTS evento_procesado (
+    consumidor      VARCHAR(100) NOT NULL,
+    clave           VARCHAR(191) NOT NULL,
+    fecha_procesado DATETIME(6)  NOT NULL,
+    PRIMARY KEY (consumidor, clave),
+    KEY ix_evento_procesado_fecha (fecha_procesado)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+```
+
+| Propiedad | Default | Qué es |
+|---|---|---|
+| `consumo-idempotente.enabled` | `false` | Activa el consumo idempotente |
+| `consumo-idempotente.almacen` | (obligatorio) | `jdbc` o `mongo` |
+| `consumo-idempotente.retencion` | `30d` | Cuánto se conserva cada marca |
+| `consumo-idempotente.intervalo-limpieza` | `1h` | Pausa entre limpiezas (JDBC) |
+| `consumo-idempotente.tabla` / `coleccion` | `evento_procesado` | Dónde se guardan las marcas |
+
+**Retención.** La protección principal contra un efecto repetido son las **guardas de estado del propio dominio**: no
+repetir una transición que ya ocurrió. La marca es la segunda barrera, para los duplicados que llegan antes de que el
+estado cambie o cuando no hay estado que mirar.
+
+Por eso la retención tiene que ser **mayor que** dos cosas:
+- la retención de los topics que se consumen, porque un consumidor que rebobina offsets reentrega todo lo que el topic
+  guarda;
+- lo que tarde en resolverse a mano un evento fallido del outbox que se reintenta con el mismo `eventId`.
+
+30 días cubren la retención por defecto de Kafka (7 días) y un plazo de resolución manual de dos semanas. Si un topic
+guarda más tiempo, hay que subirla.
+
+### Pruebas de 0.6.0
+
+Todas con Testcontainers: MySQL 8, Mongo 7 en replica set de un nodo y Kafka.
+- **Outbox genérico**, en los dos almacenes:
+  - transacción confirmada y revertida;
+  - publicación real en Kafka con clave y cabeceras;
+  - auditoría y genéricos juntos, con el resumen por tipo;
+  - 30 claves bloqueadas al principio, con más de una página de candidatos: el lote se llena solo con las claves
+    libres;
+  - "solo drenar";
+  - métricas que se siguen actualizando con `timeout-ack` de 30 s mientras el relay espera un ack.
+- **Esquema:** tabla de 0.5.x sin la columna `tipo` y nombres de tabla inválidos; índices y TTL en Mongo.
+- **Consumo idempotente**, en los dos almacenes:
+  - duplicado secuencial;
+  - marca por consumidor;
+  - efecto que falla y se reintenta;
+  - clave natural `nat:`;
+  - 8 entregas concurrentes que aplican el efecto una sola vez;
+  - limpieza por retención.
+- **Autoconfiguración:**
+  - `OutboxPort` con topics resueltos, y fail-fast si falta un topic o el esquema no sirve;
+  - `jdbc.tabla` y `solo-drenar`;
+  - gauges por tipo y alias;
+  - `consumo-idempotente`.
+- La suite de 0.5.1 corre sin cambios, salvo el test que simulaba otro relay adelantándose: ahora intercepta el
+  `updateMany` del reclamo en lugar del `findAndModify`.
 
 ---
 
@@ -66,8 +337,9 @@ En cada ciclo (`auditoria.outbox.intervalo`):
    - JDBC: transacción propia y corta en READ COMMITTED con `SELECT ... WHERE NOT EXISTS (anterior bloqueante) ...
      FOR UPDATE SKIP LOCKED`; el `NOT EXISTS` usa el índice `(clave_kafka, estado, id)` y no bloquea filas. La
      publicación ocurre **fuera** de esa transacción.
-   - Mongo: agregación con `$lookup` sobre la misma colección (el mismo filtro) y después `findAndModify` documento a
-     documento, condicionado a `estado = PENDIENTE`.
+   - Mongo: desde 0.6.0, candidatos por páginas en orden de índice con el primer bloqueante de cada clave calculado
+     por página, y un solo `updateMany` condicionado a `estado = PENDIENTE` (ver la sección 0.6.0, #14). En 0.5.x era
+     una agregación con `$lookup` y un `findAndModify` por documento.
    - Dos relays nunca reciben el mismo evento.
 3. **Orden por clave Kafka.** Un evento solo se toma si todos los anteriores no enviados de su misma `claveKafka`
    (`<entidad.tipo>:<entidad.id>`) también están en el lote (un anterior pendiente y listo puede ir en el mismo lote).
@@ -166,6 +438,8 @@ CREATE TABLE auditoria_outbox (
 | `ix_auditoria_outbox_lote` | `{estado: 1, proximoIntento: 1, fechaCreacion: 1, _id: 1}` | Reclamo del lote |
 | `ix_auditoria_outbox_clave` | `{claveKafka: 1, estado: 1, fechaCreacion: 1}` | Orden por clave |
 | `ix_auditoria_outbox_limpieza` | `{estado: 1, fechaEnvio: 1}` | Limpieza |
+| `ix_outbox_orden` (0.6.0) | `{estado: 1, fechaCreacion: 1, _id: 1}` | Candidatos del lote en orden, sin ordenar en memoria |
+| `ttl_outbox_enviados` (0.6.0) | `{fechaEnvio: 1}` TTL, parcial a `estado: ENVIADO` | Borra los ENVIADO al cumplir `auditoria.outbox.retencion` |
 
 - El orden es `fechaCreacion` y después `_id`. Mongo guarda las fechas en UTC siempre (tipo `Date`).
 - Para que el evento y el cambio de negocio sean atómicos, el servicio necesita un **`MongoTransactionManager`** y Mongo

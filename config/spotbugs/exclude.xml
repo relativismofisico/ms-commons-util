@@ -53,6 +53,34 @@
     </Match>
 
     <!-- ================================================================
+         Outbox genérico y consumo idempotente (0.6.0): mismo patrón de
+         inyección por constructor (el KafkaTemplate propio del publicador,
+         el MongoTemplate y los gestores de transacciones del servicio).
+         ================================================================ -->
+    <Match>
+        <Or>
+            <Bug pattern="EI_EXPOSE_REP"/>
+            <Bug pattern="EI_EXPOSE_REP2"/>
+        </Or>
+        <Package name="~com\.factoring\.commons\.outbox(\..*)?"/>
+    </Match>
+
+    <!-- ================================================================
+         SQL con nombre de tabla configurable (0.6.0): la tabla del outbox
+         y la de las marcas de consumo son configurables por servicio, así
+         que el nombre se concatena en el SQL. El constructor lo valida
+         contra [A-Za-z][A-Za-z0-9_]{0,63} antes de usarlo, y todos los
+         valores viajan siempre como parámetros (?), nunca concatenados.
+         ================================================================ -->
+    <Match>
+        <Bug pattern="SQL_INJECTION_SPRING_JDBC"/>
+        <Or>
+            <Class name="com.factoring.commons.auditoria.outbox.jdbc.JdbcAuditoriaOutboxAdapter"/>
+            <Class name="com.factoring.commons.outbox.idempotencia.JdbcConsumoIdempotente"/>
+        </Or>
+    </Match>
+
+    <!-- ================================================================
          Test classes — exclude all SpotBugs analysis on tests
          Clases *Spec (Spock, único framework de test de este repo desde
          el día uno) más las clases internas que el compilador de Groovy
@@ -75,7 +103,7 @@
          integración, contenedores y reloj de prueba): mismo criterio que las
          *Spec, son clases Groovy de test con sus closures. -->
     <Match>
-        <Class name="~com\.factoring\.commons\.auditoria\.outbox\.(OutboxIntegracionBase|KafkaDePrueba|RelojDePrueba)(\$.*)?"/>
+        <Class name="~com\.factoring\.commons\.auditoria\.outbox\.(OutboxIntegracionBase|KafkaDePrueba|RelojDePrueba|MedicionTomarLote)(\$.*)?"/>
     </Match>
 
 </FindBugsFilter>

@@ -1,15 +1,18 @@
 package com.factoring.commons.auditoria.outbox;
 
 import java.time.Clock;
+import java.time.Instant;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Último {@link ResumenOutbox} leído del almacén, para las métricas. Lo refresca el planificador cada
- * {@code auditoria.outbox.intervalo-metricas}, y solo si alguien lo usa (las gauges de Micrometer lo activan): así un
- * servicio sin Micrometer no consulta el almacén de más. Leer las gauges nunca consulta la base.
+ * Último resumen del almacén, total y por tipo, para las métricas. Lo refresca el planificador cada
+ * {@code auditoria.outbox.intervalo-metricas} en un hilo propio, separado del relay (un relay esperando un ack no lo
+ * congela), y solo si alguien lo usa (las gauges de Micrometer lo activan): así un servicio sin Micrometer no consulta
+ * el almacén de más. Leer las gauges nunca consulta la base.
  */
 @Slf4j
 public class AuditoriaOutboxEstadisticas {
@@ -19,9 +22,12 @@ public class AuditoriaOutboxEstadisticas {
     private final AuditoriaOutboxPort outbox;
     private final Clock reloj;
     private final AtomicBoolean activa = new AtomicBoolean();
-    private final AtomicLong pendientes = new AtomicLong();
-    private final AtomicLong fallidos = new AtomicLong();
-    private final AtomicLong masAntiguoEpochMs = new AtomicLong(-1);
+    private final AtomicReference<Lectura> ultima = new AtomicReference<>(
+            new Lectura(ResumenOutbox.VACIO, 0, Map.of()));
+
+    /** Una lectura completa del almacén; se reemplaza entera para que las gauges nunca mezclen dos lecturas. */
+    private record Lectura(ResumenOutbox total, long enProceso, Map<String, ResumenTipo> porTipo) {
+    }
 
     /**
      * @param outbox almacén del outbox
@@ -52,14 +58,16 @@ public class AuditoriaOutboxEstadisticas {
             return;
         }
         try {
-            final ResumenOutbox resumen = outbox.resumen();
-            pendientes.set(resumen.pendientes());
-            fallidos.set(resumen.fallidos());
-            if (resumen.masAntiguo() == null) {
-                masAntiguoEpochMs.set(-1);
-            } else {
-                masAntiguoEpochMs.set(resumen.masAntiguo().toEpochMilli());
+            final ResumenOutbox total = outbox.resumen();
+            Map<String, ResumenTipo> porTipo = outbox.resumenPorTipo();
+            if (porTipo == null) {
+                porTipo = Map.of();
             }
+            long enProceso = 0;
+            for (final ResumenTipo resumen : porTipo.values()) {
+                enProceso += resumen.enProceso();
+            }
+            ultima.set(new Lectura(total, enProceso, Map.copyOf(porTipo)));
         } catch (RuntimeException e) {
             log.warn("[AUDITORIA][OUTBOX] no se pudieron leer las métricas: {}", ErrorSaneado.de(e));
         }
@@ -71,7 +79,7 @@ public class AuditoriaOutboxEstadisticas {
      * @return la última lectura
      */
     public long pendientes() {
-        return pendientes.get();
+        return ultima.get().total().pendientes();
     }
 
     /**
@@ -80,7 +88,16 @@ public class AuditoriaOutboxEstadisticas {
      * @return la última lectura
      */
     public long fallidos() {
-        return fallidos.get();
+        return ultima.get().total().fallidos();
+    }
+
+    /**
+     * Eventos EN_PROCESO (reclamados por un relay).
+     *
+     * @return la última lectura
+     */
+    public long enProceso() {
+        return ultima.get().enProceso();
     }
 
     /**
@@ -89,10 +106,57 @@ public class AuditoriaOutboxEstadisticas {
      * @return la edad
      */
     public double edadMasAntiguoSegundos() {
-        final long creacion = masAntiguoEpochMs.get();
-        if (creacion < 0) {
+        return edad(ultima.get().total().masAntiguo());
+    }
+
+    /**
+     * Eventos PENDIENTE y EN_PROCESO de un tipo.
+     *
+     * @param tipo tipo del evento
+     * @return la última lectura (0 si no tiene)
+     */
+    public long pendientes(final String tipo) {
+        return delTipo(tipo).pendientes();
+    }
+
+    /**
+     * Eventos FALLIDO de un tipo.
+     *
+     * @param tipo tipo del evento
+     * @return la última lectura (0 si no tiene)
+     */
+    public long fallidos(final String tipo) {
+        return delTipo(tipo).fallidos();
+    }
+
+    /**
+     * Eventos EN_PROCESO de un tipo.
+     *
+     * @param tipo tipo del evento
+     * @return la última lectura (0 si no tiene)
+     */
+    public long enProceso(final String tipo) {
+        return delTipo(tipo).enProceso();
+    }
+
+    /**
+     * Segundos que lleva esperando el pendiente más antiguo de un tipo.
+     *
+     * @param tipo tipo del evento
+     * @return la edad (0 si no tiene pendientes)
+     */
+    public double edadMasAntiguoSegundos(final String tipo) {
+        return edad(delTipo(tipo).masAntiguo());
+    }
+
+    private ResumenTipo delTipo(final String tipo) {
+        return ultima.get().porTipo().getOrDefault(tipo, ResumenTipo.VACIO);
+    }
+
+    private double edad(final Instant masAntiguo) {
+        if (masAntiguo == null) {
             return 0;
         }
-        return Math.max(0, (reloj.millis() - creacion) / MILIS_POR_SEGUNDO);
+        return Math.max(0, (reloj.millis() - masAntiguo.toEpochMilli()) / MILIS_POR_SEGUNDO);
     }
 }

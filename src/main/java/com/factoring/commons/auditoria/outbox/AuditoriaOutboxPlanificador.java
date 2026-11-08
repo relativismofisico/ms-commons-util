@@ -7,9 +7,10 @@ import java.util.concurrent.TimeUnit;
 import org.springframework.context.SmartLifecycle;
 
 /**
- * Corre el relay cada {@code auditoria.outbox.intervalo}, la limpieza cada {@code auditoria.outbox.intervalo-limpieza}
- * y el refresco de las métricas cada {@code auditoria.outbox.intervalo-metricas}, en un hilo propio, sin depender de
- * que el servicio active {@code @EnableScheduling}.
+ * Corre el relay cada {@code auditoria.outbox.intervalo} y la limpieza cada {@code auditoria.outbox.intervalo-limpieza}
+ * en un hilo propio, y el refresco de las métricas cada {@code auditoria.outbox.intervalo-metricas} en OTRO hilo: un
+ * relay esperando un ack (hasta {@code timeout-ack} por evento) no congela las métricas, que es justo cuando más
+ * sirven. No depende de que el servicio active {@code @EnableScheduling}.
  */
 public class AuditoriaOutboxPlanificador implements SmartLifecycle {
 
@@ -20,6 +21,7 @@ public class AuditoriaOutboxPlanificador implements SmartLifecycle {
     private final AuditoriaOutboxProperties propiedades;
     private final AuditoriaOutboxEstadisticas estadisticas;
     private ScheduledExecutorService ejecutor;
+    private ScheduledExecutorService ejecutorMetricas;
 
     /**
      * @param relay       relay del outbox
@@ -50,20 +52,23 @@ public class AuditoriaOutboxPlanificador implements SmartLifecycle {
         if (ejecutor != null) {
             return;
         }
-        ejecutor = Executors.newSingleThreadScheduledExecutor(tarea -> {
-            final Thread hilo = new Thread(tarea, "auditoria-outbox");
-            hilo.setDaemon(true);
-            return hilo;
-        });
+        ejecutor = Executors.newSingleThreadScheduledExecutor(tarea -> hilo(tarea, "auditoria-outbox"));
         final long intervalo = propiedades.getIntervalo().toMillis();
         ejecutor.scheduleWithFixedDelay(relay::ejecutarCicloSeguro, intervalo, intervalo, TimeUnit.MILLISECONDS);
         final long intervaloLimpieza = propiedades.getIntervaloLimpieza().toMillis();
         ejecutor.scheduleWithFixedDelay(limpieza::limpiarSeguro, intervaloLimpieza, intervaloLimpieza,
                 TimeUnit.MILLISECONDS);
         if (estadisticas != null) {
-            ejecutor.scheduleWithFixedDelay(estadisticas::actualizarSeguro, 0,
+            ejecutorMetricas = Executors.newSingleThreadScheduledExecutor(tarea -> hilo(tarea, "outbox-metricas"));
+            ejecutorMetricas.scheduleWithFixedDelay(estadisticas::actualizarSeguro, 0,
                     propiedades.getIntervaloMetricas().toMillis(), TimeUnit.MILLISECONDS);
         }
+    }
+
+    private static Thread hilo(final Runnable tarea, final String nombre) {
+        final Thread hilo = new Thread(tarea, nombre);
+        hilo.setDaemon(true);
+        return hilo;
     }
 
     @Override
@@ -71,16 +76,25 @@ public class AuditoriaOutboxPlanificador implements SmartLifecycle {
         if (ejecutor == null) {
             return;
         }
-        ejecutor.shutdown();
+        detener(ejecutorMetricas);
+        detener(ejecutor);
+        ejecutor = null;
+        ejecutorMetricas = null;
+    }
+
+    private static void detener(final ScheduledExecutorService servicio) {
+        if (servicio == null) {
+            return;
+        }
+        servicio.shutdown();
         try {
-            if (!ejecutor.awaitTermination(ESPERA_CIERRE_S, TimeUnit.SECONDS)) {
-                ejecutor.shutdownNow();
+            if (!servicio.awaitTermination(ESPERA_CIERRE_S, TimeUnit.SECONDS)) {
+                servicio.shutdownNow();
             }
         } catch (InterruptedException e) {
-            ejecutor.shutdownNow();
+            servicio.shutdownNow();
             Thread.currentThread().interrupt();
         }
-        ejecutor = null;
     }
 
     @Override
