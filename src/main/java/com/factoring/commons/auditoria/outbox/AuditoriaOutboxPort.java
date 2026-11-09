@@ -24,6 +24,22 @@ public interface AuditoriaOutboxPort {
     void guardar(AuditoriaOutboxEvento evento);
 
     /**
+     * Como {@link #guardar}, pero si ya hay un evento con el mismo {@code eventId} no escribe nada, no lanza y no deja
+     * la transacción activa marcada para revertirse: el caso de uso puede seguir y confirmar. Lo usa el registro con
+     * {@code eventId} propio (desde 0.6.1).
+     *
+     * <p>Por defecto delega en {@link #guardar} y devuelve {@code true}: un almacén propio que no lo implemente falla
+     * con su propio error de clave única ante un duplicado.</p>
+     *
+     * @param evento evento nuevo ({@link AuditoriaOutboxEvento#nuevo})
+     * @return {@code true} si lo guardó; {@code false} si ya existía uno con ese {@code eventId}
+     */
+    default boolean guardarSiNoExiste(final AuditoriaOutboxEvento evento) {
+        guardar(evento);
+        return true;
+    }
+
+    /**
      * Reclama hasta {@code tamano} eventos {@link EstadoOutbox#PENDIENTE} con {@code proximoIntento <= ahora}, en
      * orden de creación, y los deja {@link EstadoOutbox#EN_PROCESO} hasta {@code leaseHasta}. Solo toma un evento si
      * todos los anteriores no enviados de su misma clave Kafka también están en el lote. Dos relays a la vez nunca

@@ -11,13 +11,118 @@ coincide con `version` de `build.gradle`).
 | `com.factoring.commons.mdc` | Trazabilidad: `requestId` y actor en el MDC, propagación a Feign / RestTemplate / WebClient |
 | `com.factoring.commons.auditoria` | Contrato `AuditoriaAccionEvent` y publicador Kafka autoconfigurado (`auditoria.*`) |
 | `com.factoring.commons.auditoria.outbox` | Outbox transaccional de auditoría, opcional (`auditoria.outbox.*`, desde 0.5.0) |
-| `com.factoring.commons.outbox` | Outbox genérico: sobre `EventoOutbox`, `TiposDeEvento`, `OutboxPort` y publicador con cabeceras (desde 0.6.0) |
+| `com.factoring.commons.outbox` | Outbox genérico: sobre `EventoOutbox`, `TiposDeEvento`, `OutboxPort` y publicador con cabeceras (desde 0.6.0); `eventId` propio y formato compatible con `JsonSerializer` (desde 0.6.1) |
 | `com.factoring.commons.outbox.idempotencia` | `ConsumoIdempotente`: efecto a lo sumo una vez por consumidor y evento (`consumo-idempotente.*`, desde 0.6.0) |
 
 Todas las dependencias de Spring, Kafka, JDBC, Mongo y ShedLock son `compileOnly`: cada pieza se registra solo si el
 servicio trae la librería correspondiente.
 
 La definición de terminado de la plataforma está en [DEFINITION_OF_DONE.md](DEFINITION_OF_DONE.md).
+
+---
+
+## 0.6.1: `eventId` propio y formato compatible con `JsonSerializer`
+
+### Compatibilidad
+
+Un servicio que sube de 0.6.0 (o de 0.5.1) sin usar lo nuevo sigue exactamente igual: `registrar(tipo, payload)`
+genera el UUID como antes, todos los tipos salen como sobre y no cambia ninguna propiedad, tabla ni colección. Lo
+nuevo se activa en código: con la sobrecarga de `registrar` o con una opción en la declaración del tipo. La suite de
+0.6.0 pasa sin modificaciones.
+
+Cambios visibles en la API (todos aditivos):
+- `OutboxPort` gana `registrar(tipo, eventId, payload)` como método `default`. En una implementación propia que no
+  lo sobrescriba, lanza `UnsupportedOperationException`.
+- `AuditoriaOutboxPort` gana `guardarSiNoExiste(evento)` como método `default`, que delega en `guardar`.
+- `TipoDeEvento` gana el componente `idTipoCompatible`, al final. Conserva el constructor de 5 argumentos.
+- `KafkaPublicadorOutbox` gana un constructor que recibe los `TiposDeEvento`; el de 0.6.0 sigue.
+- `AuditoriaOutboxMetricas` gana un constructor con el contador de duplicados.
+- Métrica nueva: `outbox.duplicados`.
+
+### `eventId` propio
+
+```java
+outbox.registrar("documento.creado", documento.id(), new DocumentoCreado(documento.id(), ...));
+// Optional<EventoOutbox<DocumentoCreado>>: vacío si ese eventId ya estaba en el outbox
+```
+
+- El valor que pasa el productor (por ejemplo el id del agregado) es a la vez el `eventId` del sobre guardado, el de
+  la fila o documento (`event_id` / `eventId`) y el de la cabecera `eventId` del mensaje.
+- Tiene que tener entre 1 y 64 caracteres (`EventoOutbox.LONGITUD_MAXIMA_EVENT_ID`, el ancho de la columna
+  `event_id`) y no puede estar en blanco: si no, `IllegalArgumentException` y no se guarda nada.
+- Se aplican las mismas reglas que en `registrar(tipo, payload)`: tipo declarado, clase del payload, clave no vacía y
+  modo "solo drenar".
+
+**`eventId` repetido en el mismo almacén.** Si ya hay un evento con ese `eventId`:
+- no se escribe un segundo evento, y el que estaba no cambia;
+- **no falla la transacción de negocio**: `registrar` devuelve vacío y el caso de uso puede seguir y confirmar;
+- se cuenta en `outbox.duplicados` (tags `tipo` y `servicio`) y queda un WARN con el tipo y el `eventId`.
+
+Por qué: con un id de negocio, un segundo registro del mismo `eventId` es casi siempre un reintento del mismo caso de
+uso, y el evento que se quiere ya está guardado. Hacer fallar la transacción revertiría trabajo correcto. Publicar dos
+veces el mismo `eventId` con contenidos distintos sería peor, porque el consumidor descarta el segundo por `eventId`.
+El contador hace visible el caso para revisarlo si no se esperaba.
+
+Cómo se consigue en cada almacén:
+- **JDBC (MySQL):** el INSERT choca con el índice único de `event_id`. En MySQL eso revierte solo la sentencia, no la
+  transacción.
+- **Mongo:** dentro de una transacción, un error de clave duplicada la abortaría entera. Por eso se escribe con un
+  upsert por `eventId` y `$setOnInsert`, que no cambia nada si el documento existe.
+- **Registros simultáneos** del mismo `eventId` en dos transacciones abiertas a la vez:
+  - en MySQL, la segunda espera el bloqueo del índice único hasta que la primera termine; entonces ve el duplicado
+    (si la primera confirmó) o inserta (si revirtió);
+  - en Mongo, la segunda falla con un conflicto de escritura (`WriteConflict`, error transitorio), como cualquier
+    conflicto de su transacción, y se puede reintentar.
+
+  Este caso no está cubierto por las pruebas automáticas.
+- **Rollback:** si la transacción que registró el evento se revierte, el `eventId` queda libre para el reintento.
+
+### Formato compatible con `JsonSerializer`, por tipo
+
+Para migrar al outbox un productor que hoy publica con el `JsonSerializer` de Spring Kafka, sin tocar a sus
+consumidores (que leen con `JsonDeserializer` y la cabecera `__TypeId__`):
+
+```java
+TipoDeEvento.de("documento.creado", DocumentoCreado.class)
+        .topic("${topics.documento-creado}")
+        .clave(DocumentoCreado::documentoId)
+        .compatibleConJsonSerializer("documentoCreado")   // alias del spring.json.type.mapping del consumidor
+        // .compatibleConJsonSerializer()                 // o el nombre completo de la clase
+        .build();
+```
+
+Un tipo así sale con:
+- **valor:** solo el payload, con los mismos bytes que escribe un `JsonSerializer` por defecto (el `ObjectMapper` de
+  `JacksonUtils` de Spring Kafka);
+- **cabeceras:** las del sobre (`eventId`, `tipo`, `version`, `servicioOrigen`) y `__TypeId__` con el valor
+  declarado;
+- **clave:** la del tipo, como siempre.
+
+Detalles:
+- Los tipos sin la opción siguen saliendo como sobre, sin `__TypeId__`. Por defecto no hay ninguno compatible.
+- En el almacén se guarda siempre el sobre completo; la conversión la hace `KafkaPublicadorOutbox` al publicar. La
+  clase del payload tiene que poder reconstruirse desde su propio JSON (un record o un POJO con Jackson).
+- Si el productor anterior usaba un `JsonSerializer` con un `ObjectMapper` propio, los bytes pueden diferir. En ese
+  caso, o para cualquier otro formato, se declara un bean `PublicadorOutbox` propio: el de la librería es
+  `@ConditionalOnMissingBean`.
+- Con `eventId` propio, la cabecera `eventId` del mensaje lleva ese valor.
+
+### Pruebas de 0.6.1
+
+Las de integración corren contra MySQL 8, Mongo 7 en replica set y un broker Kafka reales (Testcontainers):
+- `JdbcEventIdPropioIntegracionSpec` y `MongoEventIdPropioIntegracionSpec`, sobre la base común `EventIdPropioBaseSpec`:
+  - el `eventId` propio es el mismo en la fila, en el sobre y en la cabecera;
+  - un `eventId` repetido, en la misma transacción y en otra, no escribe un segundo evento, el negocio confirma y se
+    cuenta;
+  - después de un rollback, el reintento registra el evento;
+  - se valida el `eventId`: vacío, en blanco, nulo o de más de 64 caracteres;
+  - el valor de un tipo compatible es idéntico byte a byte al del `JsonSerializer`, con `__TypeId__` (alias y nombre
+    de clase) y las cabeceras del sobre;
+  - un tipo no compatible sale como sobre;
+  - un consumidor real con `JsonDeserializer`, mapeo de alias y paquetes de confianza lee el mensaje sin nada
+    especial.
+- `OutboxCompatibilidadSpec`: la declaración de los tipos, los puertos por defecto y la autoconfiguración (el
+  publicador recibe los tipos y se publica `outbox.duplicados`).
 
 ---
 
@@ -49,7 +154,7 @@ Cambios visibles:
 
 | Campo | Qué es |
 |---|---|
-| `eventId` | UUID que genera el productor al registrar el evento, dentro de su transacción. Es la clave de idempotencia de punta a punta: el relay y los reintentos no lo cambian |
+| `eventId` | UUID que genera el productor al registrar el evento, dentro de su transacción, o el id propio que pasa el productor (desde 0.6.1). Es la clave de idempotencia de punta a punta: el relay y los reintentos no lo cambian |
 | `tipo`, `version` | Nombre lógico estable del evento y versión del esquema del payload |
 | `servicioOrigen` | `spring.application.name` del productor |
 | `ocurridoEn` | Instante UTC del registro |

@@ -33,7 +33,7 @@ public final class TiposDeEvento {
 
     /**
      * Declara los tipos. Valida lo que no depende del entorno: nombres únicos y no vacíos, versión 1 o más, topic y
-     * función de clave presentes.
+     * función de clave presentes, y un {@code __TypeId__} no vacío en los tipos compatibles con {@code JsonSerializer}.
      *
      * @param tipos tipos del servicio
      * @return el registro
@@ -57,6 +57,9 @@ public final class TiposDeEvento {
             exigir(tipo.version() > 0, "el tipo " + tipo.nombre() + " tiene que tener versión 1 o más");
             exigir(tipo.topic() != null && !tipo.topic().isBlank(), "el tipo " + tipo.nombre() + " no tiene topic");
             exigir(tipo.clave() != null, "el tipo " + tipo.nombre() + " no tiene función de clave");
+            exigir(tipo.idTipoCompatible() == null || !tipo.idTipoCompatible().isBlank(),
+                    "el tipo " + tipo.nombre() + " es compatible con JsonSerializer pero su "
+                            + TipoDeEvento.CABECERA_TIPO_SPRING + " está vacío");
             exigir(porNombre.put(tipo.nombre(), tipo) == null, "el tipo " + tipo.nombre() + " está declarado dos veces");
         }
         exigir(!porNombre.isEmpty(), "no hay tipos de evento declarados");

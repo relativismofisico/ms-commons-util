@@ -3,6 +3,7 @@ package com.factoring.commons.auditoria.outbox;
 import java.time.Clock;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.ToLongFunction;
 import javax.sql.DataSource;
 
 import com.factoring.commons.auditoria.AuditoriaAutoConfiguration;
@@ -174,7 +175,8 @@ public class AuditoriaOutboxAutoConfiguration {
 
     /**
      * Publicador de los eventos genéricos: un productor propio con las propiedades {@code spring.kafka.*} del servicio,
-     * serializers String, {@code acks=all} e idempotencia (como el de auditoría; no se expone el template).
+     * serializers String, {@code acks=all} e idempotencia (como el de auditoría; no se expone el template). Los tipos
+     * declarados como compatibles con {@code JsonSerializer} salen con ese formato.
      */
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass(KafkaTemplate.class)
@@ -184,14 +186,16 @@ public class AuditoriaOutboxAutoConfiguration {
         @Bean
         @ConditionalOnMissingBean(PublicadorOutbox.class)
         KafkaPublicadorOutbox publicadorOutbox(final KafkaProperties kafkaProperties,
-                final ObjectProvider<SslBundles> sslBundles, @Value(SERVICIO) final String servicioOrigen) {
+                final ObjectProvider<SslBundles> sslBundles, @Value(SERVICIO) final String servicioOrigen,
+                final ObjectProvider<TiposDeEvento> tipos) {
             final Map<String, Object> propiedades = kafkaProperties.buildProducerProperties(sslBundles.getIfAvailable());
             propiedades.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
             propiedades.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
             propiedades.put(ProducerConfig.ACKS_CONFIG, "all");
             propiedades.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
             propiedades.putIfAbsent(ProducerConfig.CLIENT_ID_CONFIG, servicioOrigen + "-outbox");
-            return new KafkaPublicadorOutbox(new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(propiedades)));
+            return new KafkaPublicadorOutbox(new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(propiedades)),
+                    tipos.getIfAvailable());
         }
     }
 
@@ -243,13 +247,18 @@ public class AuditoriaOutboxAutoConfiguration {
 
         @Bean
         AuditoriaOutboxMetricas auditoriaOutboxMetricas(final AuditoriaOutboxEstadisticas estadisticas,
-                @Value(SERVICIO) final String servicioOrigen, final ObjectProvider<TiposDeEvento> tipos) {
+                @Value(SERVICIO) final String servicioOrigen, final ObjectProvider<TiposDeEvento> tipos,
+                final ObjectProvider<OutboxPort> puerto) {
             Set<String> declarados = Set.of();
             final TiposDeEvento delServicio = tipos.getIfAvailable();
             if (delServicio != null) {
                 declarados = delServicio.nombres();
             }
-            return new AuditoriaOutboxMetricas(estadisticas, servicioOrigen, declarados);
+            ToLongFunction<String> duplicados = null;
+            if (puerto.getIfUnique() instanceof OutboxRegistro registro) {
+                duplicados = registro::duplicados;
+            }
+            return new AuditoriaOutboxMetricas(estadisticas, servicioOrigen, declarados, duplicados);
         }
     }
 

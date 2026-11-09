@@ -2,7 +2,9 @@ package com.factoring.commons.auditoria.outbox;
 
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.function.ToLongFunction;
 
+import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.MeterBinder;
@@ -16,7 +18,9 @@ import io.micrometer.core.instrument.binder.MeterBinder;
  *   <li>{@value #OUTBOX_EN_PROCESO}: eventos EN_PROCESO (reclamados por un relay, con lease);</li>
  *   <li>{@value #OUTBOX_FALLIDOS}: eventos FALLIDO (cada uno bloquea los posteriores de su clave: alertar si es mayor
  *       que 0);</li>
- *   <li>{@value #OUTBOX_EDAD}: segundos que lleva esperando el pendiente más antiguo.</li>
+ *   <li>{@value #OUTBOX_EDAD}: segundos que lleva esperando el pendiente más antiguo;</li>
+ *   <li>{@value #OUTBOX_DUPLICADOS} (contador, desde 0.6.1, solo tipos genéricos): registros con {@code eventId}
+ *       propio descartados porque el almacén ya tenía ese {@code eventId}.</li>
  * </ul>
  *
  * <p>Alias de 0.5.x, con el total de todos los tipos y solo el tag {@code servicio}, durante 0.6.x:
@@ -45,12 +49,17 @@ public class AuditoriaOutboxMetricas implements MeterBinder {
     /** Gauge de la edad del pendiente más antiguo por tipo. */
     public static final String OUTBOX_EDAD = "outbox.edad_mas_antiguo_segundos";
 
+    /** Contador de registros descartados por {@code eventId} repetido, por tipo. */
+    public static final String OUTBOX_DUPLICADOS = "outbox.duplicados";
+
     private static final String TAG_SERVICIO = "servicio";
     private static final String TAG_TIPO = "tipo";
 
     private final AuditoriaOutboxEstadisticas estadisticas;
     private final String servicio;
     private final Set<String> tipos;
+    private final Set<String> genericos;
+    private final ToLongFunction<String> duplicados;
 
     /**
      * Gauges solo para los eventos de auditoría.
@@ -69,7 +78,21 @@ public class AuditoriaOutboxMetricas implements MeterBinder {
      */
     public AuditoriaOutboxMetricas(final AuditoriaOutboxEstadisticas estadisticas, final String servicio,
             final Set<String> tipos) {
+        this(estadisticas, servicio, tipos, null);
+    }
+
+    /**
+     * @param estadisticas estadísticas del outbox
+     * @param servicio     {@code spring.application.name}, valor del tag {@code servicio}
+     * @param tipos        tipos genéricos declarados (además de {@value AuditoriaOutboxEvento#TIPO_AUDITORIA})
+     * @param duplicados   registros descartados por {@code eventId} repetido, por tipo; {@code null} si no hay registro
+     *                     de eventos genéricos (no se publica {@value #OUTBOX_DUPLICADOS})
+     */
+    public AuditoriaOutboxMetricas(final AuditoriaOutboxEstadisticas estadisticas, final String servicio,
+            final Set<String> tipos, final ToLongFunction<String> duplicados) {
         this.estadisticas = estadisticas;
+        this.genericos = Set.copyOf(tipos);
+        this.duplicados = duplicados;
         this.servicio = servicio;
         final Set<String> todos = new LinkedHashSet<>();
         todos.add(AuditoriaOutboxEvento.TIPO_AUDITORIA);
@@ -102,6 +125,13 @@ public class AuditoriaOutboxMetricas implements MeterBinder {
             Gauge.builder(OUTBOX_EDAD, estadisticas, e -> e.edadMasAntiguoSegundos(tipo))
                     .description("Segundos que lleva esperando el evento pendiente más antiguo")
                     .baseUnit("seconds").tag(TAG_TIPO, tipo).tag(TAG_SERVICIO, servicio).register(registry);
+        }
+        if (duplicados != null) {
+            for (final String tipo : genericos) {
+                FunctionCounter.builder(OUTBOX_DUPLICADOS, duplicados, d -> d.applyAsLong(tipo))
+                        .description("Registros con eventId propio descartados porque ese eventId ya estaba en el outbox")
+                        .tag(TAG_TIPO, tipo).tag(TAG_SERVICIO, servicio).register(registry);
+            }
         }
     }
 }

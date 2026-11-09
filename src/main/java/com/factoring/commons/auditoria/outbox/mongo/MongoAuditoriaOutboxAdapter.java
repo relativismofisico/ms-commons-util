@@ -143,6 +143,30 @@ public class MongoAuditoriaOutboxAdapter implements AuditoriaOutboxPort {
 
     @Override
     public void guardar(final AuditoriaOutboxEvento evento) {
+        mongo.insert(documento(evento), coleccion);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>En una transacción de Mongo, un error de clave duplicada aborta la transacción entera; por eso no se intenta
+     * el insert, sino un upsert por {@code eventId} con {@code $setOnInsert}: si el evento ya existe no cambia nada.
+     * Dos transacciones que registran a la vez el mismo {@code eventId} chocan con un conflicto de escritura, y la
+     * segunda falla como cualquier conflicto de su transacción.</p>
+     */
+    @Override
+    public boolean guardarSiNoExiste(final AuditoriaOutboxEvento evento) {
+        final Update update = new Update();
+        documento(evento).forEach((campo, valor) -> {
+            if (!EVENT_ID.equals(campo)) {
+                update.setOnInsert(campo, valor);
+            }
+        });
+        return mongo.upsert(new Query(Criteria.where(EVENT_ID).is(evento.eventId())), update, coleccion)
+                .getUpsertedId() != null;
+    }
+
+    private static Document documento(final AuditoriaOutboxEvento evento) {
         final Document documento = new Document(EVENT_ID, evento.eventId())
                 .append(CLAVE, evento.claveKafka())
                 .append(TOPIC, evento.topic())
@@ -157,7 +181,7 @@ public class MongoAuditoriaOutboxAdapter implements AuditoriaOutboxPort {
         if (evento.tipo() != null) {
             documento.append(TIPO, evento.tipo());
         }
-        mongo.insert(documento, coleccion);
+        return documento;
     }
 
     @Override
