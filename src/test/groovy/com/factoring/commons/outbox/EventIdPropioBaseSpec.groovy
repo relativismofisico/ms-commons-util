@@ -49,6 +49,7 @@ abstract class EventIdPropioBaseSpec extends Specification {
     }
 
     RelojDePrueba reloj = new RelojDePrueba()
+    AuditoriaOutboxMetricas metricasOutbox
     AuditoriaOutboxProperties propiedades = new AuditoriaOutboxProperties(
             almacen: AuditoriaOutboxProperties.Almacen.JDBC, tamanoLote: 50, maxIntentos: 5,
             backoffBase: Duration.ofSeconds(1), backoffMax: Duration.ofSeconds(10), lease: Duration.ofMinutes(1),
@@ -160,8 +161,11 @@ abstract class EventIdPropioBaseSpec extends Specification {
         given:
         def r = registro()
         def metricas = new SimpleMeterRegistry()
-        new AuditoriaOutboxMetricas(new AuditoriaOutboxEstadisticas(almacen(), reloj), "ms-prueba",
-                tipos().nombres(), r::duplicados).bindTo(metricas)
+        // El FunctionCounter de Micrometer guarda su objeto con una referencia débil: como el bean de la
+        // autoconfiguración, el test retiene la instancia de las métricas (y con ella la función) en un campo.
+        metricasOutbox = new AuditoriaOutboxMetricas(new AuditoriaOutboxEstadisticas(almacen(), reloj), "ms-prueba",
+                tipos().nombres(), r::duplicados)
+        metricasOutbox.bindTo(metricas)
 
         when: "dos veces en la misma transacción"
         Optional primero = null
