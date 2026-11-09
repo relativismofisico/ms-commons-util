@@ -22,6 +22,7 @@ import com.factoring.commons.auditoria.outbox.EstadoOutbox;
 import com.factoring.commons.auditoria.outbox.OrdenPorClave;
 import com.factoring.commons.auditoria.outbox.ResumenOutbox;
 import com.factoring.commons.auditoria.outbox.ResumenTipo;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.RowMapper;
@@ -157,6 +158,22 @@ public final class JdbcAuditoriaOutboxAdapter implements AuditoriaOutboxPort {
                         + "proximo_intento, fecha_creacion) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 evento.eventId(), evento.claveKafka(), evento.topic(), evento.payload(), evento.estado().name(),
                 evento.intentos(), ts(evento.proximoIntento()), ts(evento.fechaCreacion()));
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>En MySQL un error de clave duplicada revierte solo la sentencia, no la transacción: se intenta el INSERT y,
+     * si choca con {@code ux_..._event_id}, se informa el duplicado.</p>
+     */
+    @Override
+    public boolean guardarSiNoExiste(final AuditoriaOutboxEvento evento) {
+        try {
+            guardar(evento);
+            return true;
+        } catch (DuplicateKeyException duplicado) {
+            return false;
+        }
     }
 
     @Override
