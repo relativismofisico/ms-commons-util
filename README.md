@@ -71,10 +71,12 @@ Cómo se consigue en cada almacén:
 - **Registros simultáneos** del mismo `eventId` en dos transacciones abiertas a la vez:
   - en MySQL, la segunda espera el bloqueo del índice único hasta que la primera termine; entonces ve el duplicado
     (si la primera confirmó) o inserta (si revirtió);
-  - en Mongo, la segunda falla con un conflicto de escritura (`WriteConflict`, error transitorio), como cualquier
-    conflicto de su transacción, y se puede reintentar.
+  - en Mongo, la segunda falla enseguida con un conflicto de escritura, con la etiqueta `TransientTransactionError`,
+    como cualquier conflicto de su transacción. No deja nada, y al reintentarla entera, ya confirmada la primera,
+    `registrar` es un no-op (devuelve vacío y el negocio confirma).
 
-  Este caso no está cubierto por las pruebas automáticas.
+  Lo cubren las pruebas de integración (`JdbcEventIdPropioIntegracionSpec` y `MongoEventIdPropioIntegracionSpec`,
+  sincronizadas con latches).
 - **Rollback:** si la transacción que registró el evento se revierte, el `eventId` queda libre para el reintento.
 
 ### Formato compatible con `JsonSerializer`, por tipo
@@ -115,6 +117,9 @@ Las de integración corren contra MySQL 8, Mongo 7 en replica set y un broker Ka
   - un `eventId` repetido, en la misma transacción y en otra, no escribe un segundo evento, el negocio confirma y se
     cuenta;
   - después de un rollback, el reintento registra el evento;
+  - dos transacciones simultáneas con el mismo `eventId`: en MySQL la segunda espera el bloqueo (si la primera
+    confirma, termina sin segundo evento; si se revierte, lo inserta); en Mongo falla con un error transitorio y al
+    reintentar es un no-op;
   - se valida el `eventId`: vacío, en blanco, nulo o de más de 64 caracteres;
   - el valor de un tipo compatible es idéntico byte a byte al del `JsonSerializer`, con `__TypeId__` (alias y nombre
     de clase) y las cabeceras del sobre;

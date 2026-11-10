@@ -3,6 +3,7 @@ package com.factoring.commons.outbox
 import com.factoring.commons.auditoria.outbox.AuditoriaOutboxPort
 import com.factoring.commons.auditoria.outbox.KafkaDePrueba
 import com.factoring.commons.auditoria.outbox.mongo.MongoAuditoriaOutboxAdapter
+import com.mongodb.MongoException
 import com.mongodb.client.MongoClient
 import com.mongodb.client.MongoClients
 import org.bson.Document
@@ -17,6 +18,8 @@ import org.testcontainers.containers.MongoDBContainer
 import spock.lang.Shared
 
 import java.time.Duration
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * 0.6.1 sobre una colección propia del servicio en un replica set real de Mongo 7. En Mongo un error de clave duplicada
@@ -114,5 +117,64 @@ class MongoEventIdPropioIntegracionSpec extends EventIdPropioBaseSpec {
         docs[1].getInteger("intentos") == 0
         docs[1].getString("tipo") == TIPO_SOBRE
         docs[1].get("proximoIntento") instanceof Date
+    }
+
+    def "concurrencia: la segunda transacción falla con un error transitorio reintentable y al reintentar es un no-op"() {
+        given:
+        def r = registro()
+        def primeraEscribio = new CountDownLatch(1)
+        def terminarPrimera = new CountDownLatch(1)
+
+        when: "la primera registra y queda abierta"
+        def hilo1 = Thread.start {
+            enTransaccion(false) {
+                escribirNegocio("C-1")
+                r.registrar(TIPO_ALIAS, "ID-CONC", documento("1", "primera"))
+                primeraEscribio.countDown()
+                terminarPrimera.await(30, TimeUnit.SECONDS)
+            }
+        }
+        primeraEscribio.await(30, TimeUnit.SECONDS)
+        and: "la segunda registra el mismo eventId mientras la primera sigue abierta"
+        Throwable error = null
+        try {
+            enTransaccion(false) {
+                escribirNegocio("C-2")
+                r.registrar(TIPO_ALIAS, "ID-CONC", documento("1", "segunda"))
+            }
+        } catch (Throwable t) {
+            error = t
+        }
+        def negocioTrasElError = existeNegocio("C-2")
+        and: "la primera confirma y la segunda se reintenta entera"
+        terminarPrimera.countDown()
+        hilo1.join(30_000)
+        Optional reintento = null
+        enTransaccion(false) {
+            escribirNegocio("C-2")
+            reintento = r.registrar(TIPO_ALIAS, "ID-CONC", documento("1", "segunda"))
+        }
+
+        then: "el error es transitorio (TransientTransactionError) y la segunda no dejó nada"
+        error != null
+        transitorio(error)
+        !negocioTrasElError
+
+        and: "el reintento confirma el negocio sin escribir otro evento"
+        reintento.isEmpty()
+        existeNegocio("C-1")
+        existeNegocio("C-2")
+        eventIdsGuardados() == ["ID-CONC"]
+        OutboxJson.deserializar(sobreGuardado("ID-CONC"), DocumentoEmitido).payload().titulo() == "primera"
+        r.duplicados(TIPO_ALIAS) == 1
+    }
+
+    private static boolean transitorio(Throwable error) {
+        for (Throwable c = error; c != null; c = c.cause) {
+            if (c instanceof MongoException && c.hasErrorLabel(MongoException.TRANSIENT_TRANSACTION_ERROR_LABEL)) {
+                return true
+            }
+        }
+        false
     }
 }
