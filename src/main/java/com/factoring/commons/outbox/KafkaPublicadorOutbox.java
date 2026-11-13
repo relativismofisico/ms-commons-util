@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -79,6 +80,12 @@ public class KafkaPublicadorOutbox implements PublicadorOutbox, DisposableBean {
         } catch (ExecutionException | TimeoutException | RuntimeException e) {
             throw new OutboxNoPublicadoException(eventId, e);
         }
+    }
+
+    /** {@code delivery.timeout.ms} efectivo del productor de este publicador. */
+    @Override
+    public Optional<Duration> plazoDeEntrega() {
+        return Optional.of(ProductorOutbox.plazoDeEntrega(kafkaTemplate.getProducerFactory().getConfigurationProperties()));
     }
 
     /**
