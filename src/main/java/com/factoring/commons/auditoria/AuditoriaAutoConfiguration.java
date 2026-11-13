@@ -2,6 +2,8 @@ package com.factoring.commons.auditoria;
 
 import java.util.Map;
 
+import com.factoring.commons.auditoria.outbox.AuditoriaOutboxProperties;
+import com.factoring.commons.outbox.ProductorOutbox;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.beans.factory.ObjectProvider;
@@ -38,6 +40,8 @@ public class AuditoriaAutoConfiguration {
      * @param sslBundles      bundles SSL, si el servicio los define
      * @param topic           {@code auditoria.topic}
      * @param servicioOrigen  {@code spring.application.name}
+     * @param outbox         {@code auditoria.outbox.*}, solo si el outbox está activo: entonces el relay espera cada
+     *                        envío con {@code timeout-ack} y el productor se acota a ese plazo (desde 0.6.2)
      * @return el publicador
      */
     @Bean
@@ -45,13 +49,18 @@ public class AuditoriaAutoConfiguration {
     public KafkaAuditoriaPublisher auditoriaPublisher(final KafkaProperties kafkaProperties,
             final ObjectProvider<SslBundles> sslBundles,
             @Value("${auditoria.topic:" + AuditoriaConstantes.TOPIC_POR_DEFECTO + "}") final String topic,
-            @Value("${spring.application.name:desconocido}") final String servicioOrigen) {
+            @Value("${spring.application.name:desconocido}") final String servicioOrigen,
+            final ObjectProvider<AuditoriaOutboxProperties> outbox) {
         final Map<String, Object> propiedades = kafkaProperties.buildProducerProperties(sslBundles.getIfAvailable());
         propiedades.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         propiedades.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         propiedades.put(ProducerConfig.ACKS_CONFIG, "all");
         propiedades.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
         propiedades.putIfAbsent(ProducerConfig.CLIENT_ID_CONFIG, servicioOrigen + "-auditoria");
+        final AuditoriaOutboxProperties conOutbox = outbox.getIfAvailable();
+        if (conOutbox != null) {
+            ProductorOutbox.acotarTimeouts(propiedades, conOutbox.getTimeoutAck());
+        }
         final KafkaTemplate<String, String> template =
                 new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(propiedades));
         return new KafkaAuditoriaPublisher(template, topic, servicioOrigen);

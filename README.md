@@ -11,13 +11,79 @@ coincide con `version` de `build.gradle`).
 | `com.factoring.commons.mdc` | Trazabilidad: `requestId` y actor en el MDC, propagación a Feign / RestTemplate / WebClient |
 | `com.factoring.commons.auditoria` | Contrato `AuditoriaAccionEvent` y publicador Kafka autoconfigurado (`auditoria.*`) |
 | `com.factoring.commons.auditoria.outbox` | Outbox transaccional de auditoría, opcional (`auditoria.outbox.*`, desde 0.5.0) |
-| `com.factoring.commons.outbox` | Outbox genérico: sobre `EventoOutbox`, `TiposDeEvento`, `OutboxPort` y publicador con cabeceras (desde 0.6.0); `eventId` propio y formato compatible con `JsonSerializer` (desde 0.6.1) |
+| `com.factoring.commons.outbox` | Outbox genérico: sobre `EventoOutbox`, `TiposDeEvento`, `OutboxPort` y publicador con cabeceras (desde 0.6.0); `eventId` propio y formato compatible con `JsonSerializer` (desde 0.6.1); un intento vencido no se entrega después (desde 0.6.2) |
 | `com.factoring.commons.outbox.idempotencia` | `ConsumoIdempotente`: efecto a lo sumo una vez por consumidor y evento (`consumo-idempotente.*`, desde 0.6.0) |
 
 Todas las dependencias de Spring, Kafka, JDBC, Mongo y ShedLock son `compileOnly`: cada pieza se registra solo si el
 servicio trae la librería correspondiente.
 
 La definición de terminado de la plataforma está en [DEFINITION_OF_DONE.md](DEFINITION_OF_DONE.md).
+
+---
+
+## 0.6.2: garantías ante una caída del broker
+
+### Qué cambia
+
+Antes de 0.6.2 el productor de los publicadores del relay conservaba cada registro `delivery.timeout.ms` (120 s por
+defecto de Kafka), más que la espera del relay (`auditoria.outbox.timeout-ack`, 30 s por defecto). Con el broker
+caído más que `timeout-ack`, cada intento que el relay daba por fallido seguía en el buffer del productor y se
+entregaba igual al volver el broker: un evento que terminaba `ENVIADO` salía `intentos + 1` veces.
+
+Desde 0.6.2 los productores que arma commons para el relay (el del outbox genérico y, con el outbox activo, el de
+auditoría) derivan sus timeouts de `timeout-ack` con `ProductorOutbox.acotarTimeouts`:
+
+| Propiedad del productor | Valor |
+|---|---|
+| `delivery.timeout.ms` | el menor entre el configurado y `timeout-ack` menos un margen (la décima parte, al menos 100 ms y nunca más de la mitad) |
+| `request.timeout.ms` | el menor entre el configurado y `delivery.timeout.ms - linger.ms` (Kafka exige `delivery.timeout.ms >= linger.ms + request.timeout.ms`) |
+| `max.block.ms` | el menor entre el configurado y `delivery.timeout.ms` |
+
+Con `timeout-ack` de 30 s: `delivery.timeout.ms` 27 000, `request.timeout.ms` 27 000 menos `linger.ms`, `max.block.ms`
+27 000. Un valor que el servicio ya tenga más bajo (`spring.kafka.producer.properties.*`) se respeta. Si
+`timeout-ack` no deja tiempo para el `linger.ms` configurado, el arranque falla con un mensaje que nombra las dos
+propiedades.
+
+No cambia nada más: mismas propiedades, mismo sobre y cabeceras, mismo formato compatible con `JsonSerializer`,
+`acks=all` e idempotencia como antes, y `PublicadorOutbox` sigue siendo sustituible. Sin el outbox, el publicador de
+auditoría queda exactamente igual.
+
+### Qué se garantiza y qué no
+
+- **Se garantiza:** un intento que vence en el relay está definitivamente fallido. El productor descarta el registro
+  antes de que el relay deje de esperarlo, así que no se entrega después ni coexiste con el reintento. Con el broker
+  parado más que `timeout-ack`, al volver sale un solo mensaje por evento.
+- **Caída corta** (menor que `timeout-ack`): el intento en curso se confirma al volver el broker; un solo mensaje.
+- **No se garantiza:** un lote que ya salió hacia el broker y cuya respuesta no llega (por ejemplo, un broker que se
+  congela con la conexión abierta) tiene resultado desconocido. Si el broker llegó a escribirlo, el reintento del
+  relay es un envío nuevo y el consumidor ve dos mensajes con el mismo `eventId`. La idempotencia del productor
+  (`enable.idempotence`, `acks=all`) evita duplicados de los reintentos internos de un mismo envío, no entre dos
+  envíos del relay. Los consumidores siguen deduplicando por `eventId` (ver `ConsumoIdempotente`).
+
+### Publicador propio
+
+Un servicio que sustituye `PublicadorOutbox` arma su propio productor y commons no lo puede acotar. Al arrancar,
+el relay llama a `ProductorOutbox.comprobar`:
+- si el publicador informa un plazo de entrega (`plazoDeEntrega()`) menor que `timeout-ack`, se registra en INFO;
+- si no es menor, se registra un ERROR con la propiedad que hay que ajustar;
+- si no lo informa (el método por defecto devuelve vacío), un WARN.
+
+No impide el arranque. Para que su productor tenga la garantía, el servicio aplica
+`ProductorOutbox.acotarTimeouts(propiedades, timeoutAck)` antes de crear el `ProducerFactory` y sobrescribe
+`plazoDeEntrega()` con `ProductorOutbox.plazoDeEntrega(propiedades)`.
+
+### Pruebas de 0.6.2
+
+- `OutboxCaidaDelBrokerIntegracionSpec`, con broker Kafka y MySQL reales (Testcontainers), autoconfiguración y relay
+  reales y `timeout-ack` de 3 s. Usa un broker propio con puerto fijo que se para y se arranca, no se pausa:
+  - caída larga, con cuatro eventos en tres claves: los cuatro fallan durante la caída y al volver sale exactamente
+    un mensaje por evento (con 0.6.1, 4, 1, 4 y 4 copias);
+  - caída corta: un solo mensaje;
+  - broker disponible: p95 de 300 confirmaciones sin cambio apreciable (3 ms antes y 2 ms después en local).
+- `ProductorOutboxSpec`:
+  - las derivaciones con varios `timeout-ack`, los valores más bajos respetados y el error de configuración;
+  - los dos productores acotados con el outbox activo y el de auditoría sin cambios sin él;
+  - el publicador propio respetado, con su aviso INFO, WARN o ERROR.
 
 ---
 

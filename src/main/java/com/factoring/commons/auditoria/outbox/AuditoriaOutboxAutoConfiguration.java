@@ -15,6 +15,7 @@ import com.factoring.commons.auditoria.outbox.mongo.MongoAuditoriaOutboxAdapter;
 import com.factoring.commons.outbox.KafkaPublicadorOutbox;
 import com.factoring.commons.outbox.OutboxPort;
 import com.factoring.commons.outbox.OutboxRegistro;
+import com.factoring.commons.outbox.ProductorOutbox;
 import com.factoring.commons.outbox.PublicadorOutbox;
 import com.factoring.commons.outbox.TiposDeEvento;
 import io.micrometer.core.instrument.binder.MeterBinder;
@@ -97,6 +98,7 @@ public class AuditoriaOutboxAutoConfiguration {
             final ObjectProvider<AuditoriaOutboxPort> outbox, final ObjectProvider<AuditoriaPublisher> publicador,
             final ObjectProvider<PublicadorOutbox> generico) {
         propiedades.validar();
+        ProductorOutbox.comprobar(generico.getIfAvailable(), propiedades.getTimeoutAck());
         return new OutboxAuditoriaRelay(outbox.getObject(), publicador.getObject(), generico.getIfAvailable(),
                 propiedades, reloj, OutboxAuditoriaRelay.Pausa.DORMIR);
     }
@@ -187,13 +189,14 @@ public class AuditoriaOutboxAutoConfiguration {
         @ConditionalOnMissingBean(PublicadorOutbox.class)
         KafkaPublicadorOutbox publicadorOutbox(final KafkaProperties kafkaProperties,
                 final ObjectProvider<SslBundles> sslBundles, @Value(SERVICIO) final String servicioOrigen,
-                final ObjectProvider<TiposDeEvento> tipos) {
+                final ObjectProvider<TiposDeEvento> tipos, final AuditoriaOutboxProperties outboxProperties) {
             final Map<String, Object> propiedades = kafkaProperties.buildProducerProperties(sslBundles.getIfAvailable());
             propiedades.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
             propiedades.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
             propiedades.put(ProducerConfig.ACKS_CONFIG, "all");
             propiedades.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
             propiedades.putIfAbsent(ProducerConfig.CLIENT_ID_CONFIG, servicioOrigen + "-outbox");
+            ProductorOutbox.acotarTimeouts(propiedades, outboxProperties.getTimeoutAck());
             return new KafkaPublicadorOutbox(new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(propiedades)),
                     tipos.getIfAvailable());
         }
